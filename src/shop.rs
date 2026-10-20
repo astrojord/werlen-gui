@@ -3,6 +3,7 @@ use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
 use rand::seq::IndexedRandom;
 use rusqlite::ErrorCode;
+use std::ops::{Index, IndexMut};
 use std::path::{Path, PathBuf};
 use std::{error::Error, fmt};
 
@@ -34,9 +35,7 @@ pub struct Shop {
     pub generated_at: Option<i64>,
 
     /// Current shop stock, taken from the catalogue
-    pub scroll_stock: Vec<StockItem>,
-    pub item_stock: Vec<StockItem>,
-    pub special_stock: Vec<StockItem>,
+    pub stock: Stock,
 }
 
 impl Shop {
@@ -70,9 +69,7 @@ impl Shop {
             saved_settings: Settings::default(),
             catalogue: Vec::new(),
             generated_at: None,
-            scroll_stock: Vec::new(),
-            item_stock: Vec::new(),
-            special_stock: Vec::new(),
+            stock: Stock::default(),
         };
         if let Err(err) = shop.load() {
             shop.notice = Some(Notice::Error(format!("couldn't load the database: {err}")));
@@ -86,7 +83,7 @@ impl Shop {
             self.saved_settings = settings;
         }
         let saved = self.db.load_shop()?;
-        [self.scroll_stock, self.item_stock, self.special_stock] = saved.lists;
+        self.stock = saved.stock;
         self.generated_at = saved.generated_at;
         self.catalogue = self.db.items()?;
         Ok(())
@@ -157,91 +154,61 @@ impl Shop {
     /// Generate a fresh shop from the catalogue and save it.
     /// Returns false if there are no scrolls or no items to draw from.
     pub fn generate_shop(&mut self) -> bool {
-        // check that we actually have shop stock pool to look at
         let (scroll_count, item_count) = self.pool_sizes();
         if scroll_count == 0 || item_count == 0 {
             return false;
         }
 
-        // new RNG whenever we re-generate
         let mut rng = rand::rng();
         let settings = self.settings;
-        // clear current stocks
-        self.item_stock.clear();
-        self.scroll_stock.clear();
-        self.special_stock.clear();
 
         // bucket the pools by tier so weighted picks are a tier draw
         // followed by a uniform draw within that tier
         let item_buckets = bucket_by_rarity(&self.catalogue);
         let level_buckets = bucket_by_level(&self.catalogue);
+        let item_tiers = |from: Rarity, to: Rarity| -> Vec<Tier> {
+            (from as usize..=to as usize)
+                .map(|r| (rarity_weight(r), item_buckets[r].as_slice()))
+                .collect()
+        };
+        let scroll_tiers = |from: usize, to: usize| -> Vec<Tier> {
+            (from..=to)
+                .map(|l| (scroll_level_weight(l), level_buckets[l].as_slice()))
+                .collect()
+        };
+        // specials draw from item and scroll tiers combined
+        let special_tiers = [
+            item_tiers(settings.min_special_rarity, settings.max_special_rarity),
+            scroll_tiers(settings.min_special_scroll_level, MAX_SCROLL_LEVEL),
+        ]
+        .concat();
 
-        let item_choices: Vec<(u32, &Vec<&StockItem>)> = (0..=settings.max_item_rarity as usize)
-            .map(|r| (rarity_weight(r), &item_buckets[r]))
-            .collect();
+        let mut stock = Stock::default();
+        stock[StockList::Scrolls] = draw(
+            &scroll_tiers(0, settings.max_scroll_level),
+            settings.max_scrolls,
+            &mut rng,
+        );
+        stock[StockList::Items] = draw(
+            &item_tiers(Rarity::Common, settings.max_item_rarity),
+            settings.max_items,
+            &mut rng,
+        );
+        stock[StockList::Specials] = draw(&special_tiers, settings.max_specials, &mut rng);
 
-        while self.item_stock.len() < settings.max_items {
-            match weighted_pick(&item_choices, &mut rng) {
-                Some(chosen) => self.item_stock.push(chosen.clone()),
-                None => break, // nothing in the pool qualifies; stop rather than spin forever
-            }
+        for list in StockList::ALL {
+            stock[list].sort_by_key(StockItem::tier_key);
         }
-
-        let scroll_choices: Vec<(u32, &Vec<&StockItem>)> = (0..=settings.max_scroll_level)
-            .map(|l| (scroll_level_weight(l), &level_buckets[l]))
-            .collect();
-
-        while self.scroll_stock.len() < settings.max_scrolls {
-            match weighted_pick(&scroll_choices, &mut rng) {
-                Some(chosen) => self.scroll_stock.push(chosen.clone()),
-                None => break,
-            }
-        }
-
-        // specials draw from item and scroll tiers combined into a single bucket
-        let special_item_choices = (settings.min_special_rarity as usize
-            ..=settings.max_special_rarity as usize)
-            .map(|r| (rarity_weight(r), &item_buckets[r]));
-        let special_scroll_choices = (settings.min_special_scroll_level..=MAX_SCROLL_LEVEL)
-            .map(|l| (scroll_level_weight(l), &level_buckets[l]));
-        let special_choices: Vec<(u32, &Vec<&StockItem>)> =
-            special_item_choices.chain(special_scroll_choices).collect();
-
-        while self.special_stock.len() < settings.max_specials {
-            match weighted_pick(&special_choices, &mut rng) {
-                Some(chosen) => self.special_stock.push(chosen.clone()),
-                None => break,
-            }
-        }
-
-        // show scrolls sorted by level, then items sorted by rarity
-        self.special_stock
-            .sort_by_key(|item| match (item.level, item.rarity) {
-                (Some(level), _) => (0u8, level, Rarity::default()),
-                (_, Some(rarity)) => (1u8, 0usize, rarity),
-                (None, None) => (2u8, 0usize, Rarity::default()),
-            });
-
-        self.scroll_stock.sort_by_key(|item| item.level);
-        self.item_stock.sort_by_key(|item| item.rarity);
+        self.stock = stock;
 
         let generated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs() as i64);
         self.generated_at = Some(generated_at);
-        if let Err(err) = self.db.save_shop(
-            [&self.scroll_stock, &self.item_stock, &self.special_stock],
-            generated_at,
-        ) {
+        if let Err(err) = self.db.save_shop(&self.stock, generated_at) {
             self.notice = Some(Notice::Error(format!("couldn't save the shop: {err}")));
         }
         true
-    }
-
-    pub fn has_stock(&self) -> bool {
-        !(self.scroll_stock.is_empty()
-            && self.item_stock.is_empty()
-            && self.special_stock.is_empty())
     }
 }
 
@@ -328,25 +295,69 @@ fn scroll_level_weight(level: usize) -> u32 {
     ((MAX_SCROLL_LEVEL + 1).saturating_sub(level) as u32).max(1)
 }
 
-/// pick an item from weighted tiers by choosing a tier first
-/// then pick uniformly inside the tier
-/// return none if every bucket is empty
-fn weighted_pick<'a>(
-    choices: &[(u32, &Vec<&'a StockItem>)],
-    rng: &mut impl Rng,
-) -> Option<&'a StockItem> {
-    let nonempty: Vec<&(u32, &Vec<&StockItem>)> = choices
-        .iter()
-        .filter(|(_, bucket)| !bucket.is_empty())
-        .collect();
+/// a tier's draw weight and the entries in it
+type Tier<'a> = (u32, &'a [&'a StockItem]);
+
+/// draw `count` entries (with replacement), stopping early if every tier is empty
+fn draw(tiers: &[Tier], count: usize, rng: &mut impl Rng) -> Vec<StockItem> {
+    (0..count)
+        .map_while(|_| weighted_pick(tiers, rng).cloned())
+        .collect()
+}
+
+/// pick a tier by weight, then an entry uniformly within it;
+/// None if every tier is empty
+fn weighted_pick<'a>(tiers: &[Tier<'a>], rng: &mut impl Rng) -> Option<&'a StockItem> {
+    let nonempty: Vec<&Tier> = tiers.iter().filter(|(_, tier)| !tier.is_empty()).collect();
     if nonempty.is_empty() {
         return None;
     }
 
     let weights: Vec<u32> = nonempty.iter().map(|(weight, _)| *weight).collect();
     let dist = WeightedIndex::new(&weights).ok()?;
-    let (_, bucket) = nonempty[dist.sample(rng)];
-    bucket.choose(rng).copied()
+    let (_, tier) = nonempty[dist.sample(rng)];
+    tier.choose(rng).copied()
+}
+
+/// one of the three lists a generated shop is made of
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StockList {
+    Scrolls,
+    Items,
+    Specials,
+}
+
+impl StockList {
+    pub const ALL: [StockList; 3] = [StockList::Scrolls, StockList::Items, StockList::Specials];
+}
+
+/// a generated shop: one list of stock per [`StockList`], indexed by it
+#[derive(Debug, Default)]
+pub struct Stock([Vec<StockItem>; 3]);
+
+impl Stock {
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Vec::is_empty)
+    }
+
+    /// every entry across all three lists
+    pub fn iter(&self) -> impl Iterator<Item = &StockItem> {
+        self.0.iter().flatten()
+    }
+}
+
+impl Index<StockList> for Stock {
+    type Output = Vec<StockItem>;
+
+    fn index(&self, list: StockList) -> &Vec<StockItem> {
+        &self.0[list as usize]
+    }
+}
+
+impl IndexMut<StockList> for Stock {
+    fn index_mut(&mut self, list: StockList) -> &mut Vec<StockItem> {
+        &mut self.0[list as usize]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -424,6 +435,17 @@ pub struct StockItem {
     pub name: String,
     pub category: String,
     pub price: usize,
+}
+
+impl StockItem {
+    /// level/rarity ordering: scrolls by level, then items by rarity
+    pub fn tier_key(&self) -> (u8, usize) {
+        match (self.level, self.rarity) {
+            (Some(level), _) => (0, level),
+            (None, Some(rarity)) => (1, rarity as usize),
+            (None, None) => (2, 0),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -563,20 +585,18 @@ mod tests {
         };
         assert!(shop.generate_shop());
 
-        assert_eq!(shop.scroll_stock.len(), 30);
-        assert!(shop.scroll_stock.iter().all(|s| s.level.unwrap() <= 2));
-        assert!(shop.scroll_stock.is_sorted_by_key(|s| s.level));
+        let scrolls = &shop.stock[StockList::Scrolls];
+        assert_eq!(scrolls.len(), 30);
+        assert!(scrolls.iter().all(|s| s.level.unwrap() <= 2));
+        assert!(scrolls.is_sorted_by_key(|s| s.level));
 
-        assert_eq!(shop.item_stock.len(), 25);
-        assert!(
-            shop.item_stock
-                .iter()
-                .all(|i| i.rarity.unwrap() <= Rarity::Uncommon)
-        );
-        assert!(shop.item_stock.is_sorted_by_key(|i| i.rarity));
+        let items = &shop.stock[StockList::Items];
+        assert_eq!(items.len(), 25);
+        assert!(items.iter().all(|i| i.rarity.unwrap() <= Rarity::Uncommon));
+        assert!(items.is_sorted_by_key(|i| i.rarity));
 
-        assert_eq!(shop.special_stock.len(), 12);
-        for special in &shop.special_stock {
+        assert_eq!(shop.stock[StockList::Specials].len(), 12);
+        for special in &shop.stock[StockList::Specials] {
             match (special.level, special.rarity) {
                 (Some(level), None) => assert!(level >= 7),
                 (None, Some(rarity)) => {
@@ -615,7 +635,10 @@ mod tests {
             shop.settings.max_item_rarity = Rarity::Legendary;
             shop.save_settings_if_changed();
             assert!(shop.generate_shop());
-            let names: Vec<String> = shop.scroll_stock.iter().map(|s| s.name.clone()).collect();
+            let names: Vec<String> = shop.stock[StockList::Scrolls]
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
             assert!(shop.generated_at.is_some());
             (shop.settings, names, shop.generated_at)
         };
@@ -623,11 +646,17 @@ mod tests {
         let shop = Shop::with_db(Db::open(&path).unwrap(), Some(path.clone()));
         assert_eq!(shop.settings, settings);
         assert_eq!(shop.generated_at, generated_at);
-        let reloaded: Vec<String> = shop.scroll_stock.iter().map(|s| s.name.clone()).collect();
+        let reloaded: Vec<String> = shop.stock[StockList::Scrolls]
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
         assert_eq!(reloaded, scroll_names);
         assert_eq!(reloaded.len(), 3);
         // picks are with replacement, so the one item fills every slot
-        assert_eq!(shop.item_stock.len(), Settings::default().max_items);
+        assert_eq!(
+            shop.stock[StockList::Items].len(),
+            Settings::default().max_items
+        );
 
         drop(shop);
         std::fs::remove_file(&path).unwrap();

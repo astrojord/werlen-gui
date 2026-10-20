@@ -4,7 +4,7 @@ use directories::ProjectDirs;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::shop::{Rarity, Settings, StockItem};
+use crate::shop::{Rarity, Settings, Stock, StockItem, StockList};
 
 /// schema migrations, applied in order. A database's `user_version` is the
 /// number of these it has already had applied; add a new file to change the schema
@@ -13,23 +13,10 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/002_shop_meta.sql"),
 ];
 
-/// which of the three generated stock lists a row belongs to
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StockList {
-    Scrolls,
-    Items,
-    Specials,
-}
-
-impl StockList {
-    pub const ALL: [StockList; 3] = [StockList::Scrolls, StockList::Items, StockList::Specials];
-}
-
 /// the last generated shop as saved in the database
 #[derive(Debug, Default)]
 pub struct SavedShop {
-    /// stock lists in [`StockList::ALL`] order
-    pub lists: [Vec<StockItem>; 3],
+    pub stock: Stock,
     /// unix seconds; None if no shop has been generated yet
     pub generated_at: Option<i64>,
 }
@@ -228,15 +215,15 @@ impl Db {
         Ok(())
     }
 
-    /// the last generated shop, in [`StockList::ALL`] order
+    /// the last generated shop
     pub fn load_shop(&self) -> rusqlite::Result<SavedShop> {
         let mut stmt = self.conn.prepare(
             "SELECT name, category, price, rarity, level FROM shop_stock
              WHERE list = ?1 ORDER BY position",
         )?;
-        let mut lists: [Vec<StockItem>; 3] = Default::default();
-        for (list, stock) in StockList::ALL.into_iter().zip(lists.iter_mut()) {
-            *stock = stmt
+        let mut stock = Stock::default();
+        for list in StockList::ALL {
+            stock[list] = stmt
                 .query_map(params![list as u8], |row| item_from_row(row, 0))?
                 .collect::<rusqlite::Result<_>>()?;
         }
@@ -249,18 +236,13 @@ impl Db {
             )
             .optional()?;
         Ok(SavedShop {
-            lists,
+            stock,
             generated_at,
         })
     }
 
-    /// replace the saved shop with `lists`, given in [`StockList::ALL`] order,
-    /// generated at `generated_at` (unix seconds)
-    pub fn save_shop(
-        &mut self,
-        lists: [&[StockItem]; 3],
-        generated_at: i64,
-    ) -> rusqlite::Result<()> {
+    /// replace the saved shop with `stock`, generated at `generated_at` (unix seconds)
+    pub fn save_shop(&mut self, stock: &Stock, generated_at: i64) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM shop_stock", [])?;
         tx.execute(
@@ -272,8 +254,8 @@ impl Db {
                 "INSERT INTO shop_stock (list, position, name, category, price, rarity, level)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
-            for (list, stock) in StockList::ALL.into_iter().zip(lists) {
-                for (position, item) in stock.iter().enumerate() {
+            for list in StockList::ALL {
+                for (position, item) in stock[list].iter().enumerate() {
                     insert.execute(params![
                         list as u8,
                         position,
@@ -340,7 +322,7 @@ mod tests {
         assert!(db.items().unwrap().is_empty());
         assert_eq!(db.load_settings().unwrap(), None);
         let saved = db.load_shop().unwrap();
-        assert!(saved.lists.iter().all(Vec::is_empty));
+        assert!(saved.stock.is_empty());
         assert_eq!(saved.generated_at, None);
     }
 
@@ -441,29 +423,32 @@ mod tests {
     #[test]
     fn shop_round_trip() {
         let mut db = Db::open_in_memory().unwrap();
-        let scrolls = [
+        let mut stock = Stock::default();
+        stock[StockList::Scrolls] = vec![
             item("Shield", None, Some(1), 60),
             item("Fireball", None, Some(3), 300),
         ];
-        let items = [item("Bag of Holding", Some(Rarity::Uncommon), None, 1000)];
-        db.save_shop([&scrolls, &items, &[]], 1_000).unwrap();
+        stock[StockList::Items] = vec![item("Bag of Holding", Some(Rarity::Uncommon), None, 1000)];
+        db.save_shop(&stock, 1_000).unwrap();
 
         let saved = db.load_shop().unwrap();
         assert_eq!(saved.generated_at, Some(1_000));
-        let [s, i, sp] = saved.lists;
         assert_eq!(
-            s.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            saved.stock[StockList::Scrolls]
+                .iter()
+                .map(|x| x.name.as_str())
+                .collect::<Vec<_>>(),
             ["Shield", "Fireball"]
         );
-        assert_eq!(i.len(), 1);
-        assert!(sp.is_empty());
+        assert_eq!(saved.stock[StockList::Items].len(), 1);
+        assert!(saved.stock[StockList::Specials].is_empty());
 
         // saving again replaces rather than appends
-        db.save_shop([&[], &items, &[]], 2_000).unwrap();
+        stock[StockList::Scrolls].clear();
+        db.save_shop(&stock, 2_000).unwrap();
         let saved = db.load_shop().unwrap();
         assert_eq!(saved.generated_at, Some(2_000));
-        let [s, i, _] = saved.lists;
-        assert!(s.is_empty());
-        assert_eq!(i.len(), 1);
+        assert!(saved.stock[StockList::Scrolls].is_empty());
+        assert_eq!(saved.stock[StockList::Items].len(), 1);
     }
 }
