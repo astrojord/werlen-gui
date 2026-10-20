@@ -1,12 +1,20 @@
 use std::path::Path;
+use std::time::Duration;
 
+use chrono::{Local, TimeZone};
 use egui::{Color32, RichText};
 use egui_extras::{Column, TableBuilder};
 
-use crate::shop::{MAX_SCROLL_LEVEL, POOL_MAX, Rarity, Shop, StockItem, StockStatus};
+use crate::shop::{MAX_SCROLL_LEVEL, Notice, POOL_MAX, Rarity, Shop, StockItem};
 
 const OK_COLOR: Color32 = Color32::from_rgb(90, 190, 110);
 const ERR_COLOR: Color32 = Color32::from_rgb(230, 80, 80);
+/// fill for the primary Generate button
+const ACCENT: Color32 = Color32::from_rgb(255, 200, 100);
+
+/// how long info toasts stay up, and how long of that they spend fading out
+const TOAST_SECS: f64 = 4.0;
+const TOAST_FADE_SECS: f64 = 0.6;
 
 /// most expensive thing the item form will let you price something at
 const PRICE_MAX: usize = 1_000_000;
@@ -30,6 +38,11 @@ impl Tab {
         Tab::Settings,
     ];
 
+    /// the shop tabs show generated stock; the rest manage it
+    fn is_shop(self) -> bool {
+        matches!(self, Tab::Scrolls | Tab::Items | Tab::Specials)
+    }
+
     fn title(self) -> &'static str {
         match self {
             Tab::Scrolls => "Scrolls",
@@ -46,6 +59,14 @@ impl Tab {
 enum Kind {
     Scroll,
     Item,
+}
+
+/// a short-lived message in the bottom-right corner; errors stay until dismissed
+struct Toast {
+    text: String,
+    error: bool,
+    /// egui time it was created, in seconds
+    created: f64,
 }
 
 /// the add/edit item dialog
@@ -117,6 +138,8 @@ pub struct WerlenApp {
     editing: Option<ItemForm>,
     /// Item awaiting delete confirmation, if any
     pending_delete: Option<StockItem>,
+
+    toasts: Vec<Toast>,
 }
 
 impl Default for WerlenApp {
@@ -129,6 +152,7 @@ impl Default for WerlenApp {
             kind_filter: None,
             editing: None,
             pending_delete: None,
+            toasts: Vec::new(),
         }
     }
 }
@@ -151,56 +175,169 @@ impl WerlenApp {
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Werlen's Ware Generator 🧙").strong());
+            ui.vertical(|ui| {
+                ui.heading(RichText::new("Werlen's wares").strong());
+                ui.weak(self.shop_summary());
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let generate = egui::Button::new(
+                    RichText::new("🎲 Generate shop")
+                        .size(16.0)
+                        .strong()
+                        .color(Color32::BLACK),
+                )
+                .fill(ACCENT)
+                .min_size(egui::vec2(160.0, 34.0));
                 if ui
-                    .button("🎲 Generate")
-                    .on_hover_text("Generate a new shop")
+                    .add(generate)
+                    .on_hover_text("Replace the current shop with a freshly generated one")
                     .clicked()
                 {
                     self.generate();
                 }
-                if ui
-                    .button("📥 Import CSV…")
-                    .on_hover_text("Add or update catalogue items from a stock CSV")
-                    .clicked()
-                {
-                    self.import_csv();
-                }
             });
         });
 
-        let (scrolls, items) = self.shop.pool_sizes();
-        let (status_text, status_color) = match &self.shop.status {
-            StockStatus::Ready if scrolls + items == 0 => (
-                "● Database empty — import a CSV or add items on the Catalogue tab".to_string(),
-                ERR_COLOR,
-            ),
-            StockStatus::Ready => (
-                format!("● Database: {scrolls} scrolls / {items} items"),
-                OK_COLOR,
-            ),
-            StockStatus::Imported(summary) => (
-                format!(
-                    "● Imported CSV — {} added, {} updated. Database: {scrolls} scrolls / {items} items",
-                    summary.added, summary.updated
-                ),
-                OK_COLOR,
-            ),
-            StockStatus::Error(msg) => (format!("✕ {msg}"), ERR_COLOR),
-        };
-        ui.label(RichText::new(status_text).color(status_color));
-
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            for tab in Tab::ALL {
-                let label = RichText::new(tab.title()).size(15.0);
+            for tab in Tab::ALL.into_iter().filter(|t| t.is_shop()) {
+                let count = match tab {
+                    Tab::Scrolls => self.shop.scroll_stock.len(),
+                    Tab::Items => self.shop.item_stock.len(),
+                    _ => self.shop.special_stock.len(),
+                };
+                let label = RichText::new(format!("{} ({count})", tab.title())).size(15.0);
                 ui.selectable_value(&mut self.tab, tab, label);
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // right to left, so reversed
+                for tab in Tab::ALL.into_iter().rev().filter(|t| !t.is_shop()) {
+                    let label = RichText::new(tab.title()).size(15.0);
+                    ui.selectable_value(&mut self.tab, tab, label);
+                }
+            });
         });
         ui.add_space(4.0);
+    }
+
+    /// "Generated 19 Oct 2026, 19:42 · 35 entries · 14,350 gp total"
+    fn shop_summary(&self) -> String {
+        if !self.shop.has_stock() {
+            return "No shop generated yet".to_string();
+        }
+        let stock = [
+            &self.shop.scroll_stock,
+            &self.shop.item_stock,
+            &self.shop.special_stock,
+        ];
+        let entries: usize = stock.iter().map(|list| list.len()).sum();
+        let value: usize = stock
+            .iter()
+            .flat_map(|list| list.iter())
+            .map(|item| item.price)
+            .sum();
+        let totals = format!("{entries} entries · {} gp total", thousands(value));
+
+        // shops saved before generation times were recorded have no date
+        match self
+            .shop
+            .generated_at
+            .and_then(|secs| Local.timestamp_opt(secs, 0).single())
+        {
+            Some(when) => format!("Generated {} · {totals}", when.format("%-d %b %Y, %H:%M")),
+            None => totals,
+        }
+    }
+
+    fn footer(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let (scrolls, items) = self.shop.pool_sizes();
+            if scrolls + items == 0 {
+                ui.colored_label(
+                    ERR_COLOR,
+                    "Database empty — import a CSV or add items on the Catalogue tab",
+                );
+            } else {
+                ui.weak(format!(
+                    "Database: {} scrolls · {} items",
+                    thousands(scrolls),
+                    thousands(items)
+                ));
+            }
+            if self.shop.db_path.is_none() {
+                ui.colored_label(ERR_COLOR, "· in memory, changes won't be saved");
+            }
+        });
+    }
+
+    fn toast(&mut self, ctx: &egui::Context, text: String, error: bool) {
+        let created = ctx.input(|i| i.time);
+        self.toasts.push(Toast {
+            text,
+            error,
+            created,
+        });
+    }
+
+    fn show_toasts(&mut self, ctx: &egui::Context) {
+        if let Some(notice) = self.shop.notice.take() {
+            let (text, error) = match notice {
+                Notice::Imported(summary) => (
+                    format!(
+                        "Imported CSV — {} added, {} updated",
+                        thousands(summary.added),
+                        thousands(summary.updated)
+                    ),
+                    false,
+                ),
+                Notice::Error(msg) => (msg, true),
+            };
+            self.toast(ctx, text, error);
+        }
+
+        let now = ctx.input(|i| i.time);
+        self.toasts
+            .retain(|toast| toast.error || now - toast.created < TOAST_SECS);
+        if self.toasts.is_empty() {
+            return;
+        }
+
+        let mut dismissed = None;
+        egui::Area::new(egui::Id::unique("toasts"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -36.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                for (i, toast) in self.toasts.iter().enumerate() {
+                    ui.scope(|ui| {
+                        if !toast.error {
+                            let left = TOAST_SECS - (now - toast.created);
+                            ui.set_opacity((left / TOAST_FADE_SECS).clamp(0.0, 1.0) as f32);
+                        }
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if toast.error {
+                                    ui.colored_label(ERR_COLOR, format!("✕ {}", toast.text));
+                                    if ui.small_button("Dismiss").clicked() {
+                                        dismissed = Some(i);
+                                    }
+                                } else {
+                                    ui.colored_label(OK_COLOR, format!("✔ {}", toast.text));
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+
+        if let Some(i) = dismissed {
+            self.toasts.remove(i);
+        }
+        if self.toasts.iter().any(|toast| !toast.error) {
+            // keep animating the fade
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
     }
 
     fn content(&mut self, ui: &mut egui::Ui) {
@@ -214,9 +351,7 @@ impl WerlenApp {
 
         if !self.shop.has_stock() {
             ui.centered_and_justified(|ui| {
-                ui.weak(format!(
-                    "Click Generate to generate a shop and see {kind} inventory here."
-                ));
+                ui.weak(format!("Click Generate shop to see {kind} inventory here."));
             });
             return;
         }
@@ -238,6 +373,15 @@ impl WerlenApp {
             ui.selectable_value(&mut self.kind_filter, None, "All");
             ui.selectable_value(&mut self.kind_filter, Some(Kind::Scroll), "Scrolls");
             ui.selectable_value(&mut self.kind_filter, Some(Kind::Item), "Items");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("📥 Import CSV…")
+                    .on_hover_text("Add or update catalogue entries from a stock CSV")
+                    .clicked()
+                {
+                    self.import_csv();
+                }
+            });
         });
         ui.add_space(4.0);
 
@@ -383,7 +527,7 @@ impl WerlenApp {
             && let Some(dir) = self.shop.db_path.as_deref().and_then(Path::parent)
             && let Err(err) = open_in_file_manager(dir)
         {
-            self.shop.status = StockStatus::Error(format!("couldn't open folder: {err}"));
+            self.shop.notice = Some(Notice::Error(format!("couldn't open folder: {err}")));
         }
     }
 
@@ -524,7 +668,7 @@ impl WerlenApp {
             if let Some(id) = item.id
                 && let Err(err) = self.shop.delete_item(id)
             {
-                self.shop.status = StockStatus::Error(format!("couldn't delete item: {err}"));
+                self.shop.notice = Some(Notice::Error(format!("couldn't delete item: {err}")));
             }
         } else if !(cancel || modal.should_close()) {
             self.pending_delete = Some(item);
@@ -537,13 +681,32 @@ impl eframe::App for WerlenApp {
         let ctx = ui.ctx().clone();
 
         egui::Panel::top("header").show(ui, |ui| self.header(ui));
+        egui::Panel::bottom("footer").show(ui, |ui| {
+            ui.add_space(2.0);
+            self.footer(ui);
+            ui.add_space(2.0);
+        });
         egui::CentralPanel::default().show(ui, |ui| self.content(ui));
         self.shop.save_settings_if_changed();
 
         self.stock_error_modal(&ctx);
         self.item_form_modal(&ctx);
         self.delete_modal(&ctx);
+        self.show_toasts(&ctx);
     }
+}
+
+/// 1234567 -> "1,234,567"
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// open a directory in the platform's file manager
@@ -643,5 +806,19 @@ fn spell_color(level: usize) -> Color32 {
         4 | 5 => rarity_color(Rarity::Rare),
         6..=8 => rarity_color(Rarity::VeryRare),
         _ => rarity_color(Rarity::Legendary),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thousands_separators() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(25_000), "25,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 }

@@ -19,8 +19,9 @@ pub struct Shop {
     /// Where the database file lives; None if we fell back to an in-memory database
     pub db_path: Option<PathBuf>,
 
-    /// Outcome of the last load/import, shown in the header
-    pub status: StockStatus,
+    /// Something the user should be told about (an import result or an error),
+    /// waiting for the UI to take it
+    pub notice: Option<Notice>,
 
     pub settings: Settings,
     /// what's in the database, so we only write settings when they change
@@ -28,6 +29,9 @@ pub struct Shop {
 
     /// Every item and scroll in the database; the pool shops are drawn from
     pub catalogue: Vec<StockItem>,
+
+    /// When the current shop was generated, in unix seconds
+    pub generated_at: Option<i64>,
 
     /// Current shop stock, taken from the catalogue
     pub scroll_stock: Vec<StockItem>,
@@ -49,9 +53,9 @@ impl Shop {
             Err(err) => {
                 let db = Db::open_in_memory().expect("in-memory sqlite should always open");
                 let mut shop = Self::with_db(db, None);
-                shop.status = StockStatus::Error(format!(
+                shop.notice = Some(Notice::Error(format!(
                     "couldn't open the database, nothing will be saved: {err}"
-                ));
+                )));
                 shop
             }
         }
@@ -61,16 +65,17 @@ impl Shop {
         let mut shop = Self {
             db,
             db_path,
-            status: StockStatus::Ready,
+            notice: None,
             settings: Settings::default(),
             saved_settings: Settings::default(),
             catalogue: Vec::new(),
+            generated_at: None,
             scroll_stock: Vec::new(),
             item_stock: Vec::new(),
             special_stock: Vec::new(),
         };
         if let Err(err) = shop.load() {
-            shop.status = StockStatus::Error(format!("couldn't load the database: {err}"));
+            shop.notice = Some(Notice::Error(format!("couldn't load the database: {err}")));
         }
         shop
     }
@@ -80,7 +85,9 @@ impl Shop {
             self.settings = settings;
             self.saved_settings = settings;
         }
-        [self.scroll_stock, self.item_stock, self.special_stock] = self.db.load_shop()?;
+        let saved = self.db.load_shop()?;
+        [self.scroll_stock, self.item_stock, self.special_stock] = saved.lists;
+        self.generated_at = saved.generated_at;
         self.catalogue = self.db.items()?;
         Ok(())
     }
@@ -100,17 +107,17 @@ impl Shop {
         // remember these even on failure so a broken database isn't retried every frame
         self.saved_settings = self.settings;
         if let Err(err) = self.db.save_settings(&self.settings) {
-            self.status = StockStatus::Error(format!("couldn't save settings: {err}"));
+            self.notice = Some(Notice::Error(format!("couldn't save settings: {err}")));
         }
     }
 
     /// Add or update catalogue items from a CSV file
     pub fn import_csv(&mut self, path: &Path) {
         let result = read_csv(path).and_then(|items| Ok(self.db.upsert_items(&items)?));
-        self.status = match result {
-            Ok(summary) => StockStatus::Imported(summary),
-            Err(err) => StockStatus::Error(format!("import failed: {err}")),
-        };
+        self.notice = Some(match result {
+            Ok(summary) => Notice::Imported(summary),
+            Err(err) => Notice::Error(format!("import failed: {err}")),
+        });
         self.reload_catalogue();
     }
 
@@ -143,7 +150,7 @@ impl Shop {
     fn reload_catalogue(&mut self) {
         match self.db.items() {
             Ok(items) => self.catalogue = items,
-            Err(err) => self.status = StockStatus::Error(err.to_string()),
+            Err(err) => self.notice = Some(Notice::Error(err.to_string())),
         }
     }
 
@@ -218,11 +225,15 @@ impl Shop {
         self.scroll_stock.sort_by_key(|item| item.level);
         self.item_stock.sort_by_key(|item| item.rarity);
 
-        if let Err(err) =
-            self.db
-                .save_shop([&self.scroll_stock, &self.item_stock, &self.special_stock])
-        {
-            self.status = StockStatus::Error(format!("couldn't save the shop: {err}"));
+        let generated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs() as i64);
+        self.generated_at = Some(generated_at);
+        if let Err(err) = self.db.save_shop(
+            [&self.scroll_stock, &self.item_stock, &self.special_stock],
+            generated_at,
+        ) {
+            self.notice = Some(Notice::Error(format!("couldn't save the shop: {err}")));
         }
         true
     }
@@ -338,11 +349,8 @@ fn weighted_pick<'a>(
     bucket.choose(rng).copied()
 }
 
-#[derive(Debug, Default, Clone)]
-pub enum StockStatus {
-    /// Database opened fine; nothing to report
-    #[default]
-    Ready,
+#[derive(Debug, Clone)]
+pub enum Notice {
     Imported(ImportSummary),
     Error(String),
 }
@@ -500,25 +508,25 @@ mod tests {
 
         shop.import_csv(&path);
         assert!(matches!(
-            shop.status,
-            StockStatus::Imported(ImportSummary {
+            shop.notice.take(),
+            Some(Notice::Imported(ImportSummary {
                 added: 2,
                 updated: 0
-            })
+            }))
         ));
         shop.import_csv(&path);
         assert!(matches!(
-            shop.status,
-            StockStatus::Imported(ImportSummary {
+            shop.notice.take(),
+            Some(Notice::Imported(ImportSummary {
                 added: 0,
                 updated: 2
-            })
+            }))
         ));
         assert_eq!(shop.pool_sizes(), (1, 1));
         std::fs::remove_file(&path).unwrap();
 
         shop.import_csv(&path);
-        assert!(matches!(shop.status, StockStatus::Error(_)));
+        assert!(matches!(shop.notice, Some(Notice::Error(_))));
     }
 
     #[test]
@@ -589,7 +597,7 @@ mod tests {
         let path = temp_path("reopen.db");
         let _ = std::fs::remove_file(&path);
 
-        let (settings, scroll_names) = {
+        let (settings, scroll_names, generated_at) = {
             let mut db = Db::open(&path).unwrap();
             db.upsert_items(&[
                 item("Bag of Holding", Some(Rarity::Common), None),
@@ -602,11 +610,13 @@ mod tests {
             shop.save_settings_if_changed();
             assert!(shop.generate_shop());
             let names: Vec<String> = shop.scroll_stock.iter().map(|s| s.name.clone()).collect();
-            (shop.settings, names)
+            assert!(shop.generated_at.is_some());
+            (shop.settings, names, shop.generated_at)
         };
 
         let shop = Shop::with_db(Db::open(&path).unwrap(), Some(path.clone()));
         assert_eq!(shop.settings, settings);
+        assert_eq!(shop.generated_at, generated_at);
         let reloaded: Vec<String> = shop.scroll_stock.iter().map(|s| s.name.clone()).collect();
         assert_eq!(reloaded, scroll_names);
         assert_eq!(reloaded.len(), 3);
