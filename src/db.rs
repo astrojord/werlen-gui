@@ -6,46 +6,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::shop::{Rarity, Settings, StockItem};
 
-/// bump this and add a step to [`Db::migrate`] whenever the schema changes
-const SCHEMA_VERSION: i32 = 1;
-
-const SCHEMA_V1: &str = "
-CREATE TABLE items (
-    id       INTEGER PRIMARY KEY,
-    name     TEXT    NOT NULL,
-    category TEXT    NOT NULL,
-    price    INTEGER NOT NULL,
-    rarity   INTEGER,          -- Rarity index, NULL for scrolls
-    level    INTEGER           -- spell level, NULL for items
-);
--- NULLs are distinct in a plain UNIQUE constraint, so key on IFNULL'd columns
-CREATE UNIQUE INDEX items_key ON items (lower(name), ifnull(rarity, -1), ifnull(level, -1));
-
-CREATE TABLE settings (
-    id                       INTEGER PRIMARY KEY CHECK (id = 1),
-    max_scrolls              INTEGER NOT NULL,
-    max_scroll_level         INTEGER NOT NULL,
-    min_special_scroll_level INTEGER NOT NULL,
-    max_items                INTEGER NOT NULL,
-    max_item_rarity          INTEGER NOT NULL,
-    max_specials             INTEGER NOT NULL,
-    min_special_rarity       INTEGER NOT NULL,
-    max_special_rarity       INTEGER NOT NULL
-);
-
--- a snapshot of the last generated shop, copied rather than linked to items
--- so that editing the catalogue doesn't rewrite an already generated shop
-CREATE TABLE shop_stock (
-    list     INTEGER NOT NULL, -- StockList index
-    position INTEGER NOT NULL,
-    name     TEXT    NOT NULL,
-    category TEXT    NOT NULL,
-    price    INTEGER NOT NULL,
-    rarity   INTEGER,
-    level    INTEGER,
-    PRIMARY KEY (list, position)
-);
-";
+/// schema migrations, applied in order. A database's `user_version` is the
+/// number of these it has already had applied; add a new file to change the schema
+const MIGRATIONS: &[&str] = &[include_str!("../migrations/001_initial.sql")];
 
 /// which of the three generated stock lists a row belongs to
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,18 +59,18 @@ impl Db {
     }
 
     fn migrate(&mut self) -> rusqlite::Result<()> {
-        let version: i32 = self
+        let applied: usize = self
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version >= SCHEMA_VERSION {
+        if applied >= MIGRATIONS.len() {
             return Ok(());
         }
 
         let tx = self.conn.transaction()?;
-        if version < 1 {
-            tx.execute_batch(SCHEMA_V1)?;
+        for migration in &MIGRATIONS[applied..] {
+            tx.execute_batch(migration)?;
         }
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", MIGRATIONS.len())?;
         tx.commit()
     }
 
@@ -345,6 +308,16 @@ mod tests {
         assert!(db.items().unwrap().is_empty());
         assert_eq!(db.load_settings().unwrap(), None);
         assert!(db.load_shop().unwrap().iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn migrations_set_user_version() {
+        let db = Db::open_in_memory().unwrap();
+        let version: usize = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len());
     }
 
     #[test]
