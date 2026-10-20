@@ -21,6 +21,14 @@ pub(super) struct Toast {
 }
 
 impl WerlenApp {
+    pub(super) fn info_toast(&mut self, ctx: &egui::Context, text: &str) {
+        self.toasts.push(Toast {
+            text: text.to_string(),
+            error: false,
+            created: ctx.input(|i| i.time),
+        });
+    }
+
     pub(super) fn show_toasts(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         if let Some(notice) = self.shop.notice.take() {

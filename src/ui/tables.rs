@@ -161,17 +161,28 @@ pub(super) fn item_cells(row: &mut egui_extras::TableRow, item: &StockItem, verb
     });
 }
 
+/// an item's rarity or a scroll's level, as the badge shows it
+pub(super) fn tier_text(item: &StockItem, verbose: bool) -> Option<String> {
+    Some(match (item.rarity, item.level) {
+        (Some(rarity), _) => rarity.to_string(),
+        (None, Some(0)) if verbose => "Cantrip scroll".to_string(),
+        (None, Some(0)) => "Cantrip".to_string(),
+        (None, Some(level)) if verbose => format!("Lvl {level} scroll"),
+        (None, Some(level)) => format!("Level {level}"),
+        (None, None) => return None,
+    })
+}
+
 /// coloured pill showing an item's rarity or a scroll's level
 fn tier_badge(ui: &mut egui::Ui, item: &StockItem, verbose: bool) {
-    let (text, color) = match (item.rarity, item.level) {
-        (Some(rarity), _) => (rarity.to_string(), rarity_color(rarity)),
-        (None, Some(0)) if verbose => ("Cantrip scroll".to_string(), spell_color(0)),
-        (None, Some(0)) => ("Cantrip".to_string(), spell_color(0)),
-        (None, Some(level)) if verbose => (format!("Lvl {level} scroll"), spell_color(level)),
-        (None, Some(level)) => (format!("Level {level}"), spell_color(level)),
-        (None, None) => return,
+    let Some(text) = tier_text(item, verbose) else {
+        return;
     };
-    let color = color.get(ui);
+    let color = match (item.rarity, item.level) {
+        (Some(rarity), _) => rarity_color(rarity),
+        (None, level) => spell_color(level.unwrap_or_default()),
+    }
+    .get(ui);
     egui::Frame::new()
         .fill(color.gamma_multiply(0.18))
         .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.6)))

@@ -10,10 +10,12 @@ mod toasts;
 use chrono::{Local, TimeZone};
 use egui::RichText;
 
-use crate::shop::{Shop, StockItem, StockList};
+use egui_material_icons::icons::ICON_CONTENT_COPY;
+
+use crate::shop::{Shop, Stock, StockItem, StockList};
 use catalogue::{ItemForm, Kind};
-use style::{ERR_COLOR, TAB_SIZE, banner, generate_button};
-use tables::{Sort, group_repeats, sort_rows, stock_table};
+use style::{ERR_COLOR, TAB_SIZE, banner, generate_button, with_icon};
+use tables::{Sort, StockRow, group_repeats, sort_rows, stock_table, tier_text};
 use toasts::Toast;
 
 pub use style::setup_fonts;
@@ -114,6 +116,19 @@ impl WerlenApp {
                     .clicked()
                 {
                     self.generate();
+                }
+                let copy = egui::Button::new(with_icon(ICON_CONTENT_COPY, "Copy"));
+                if ui
+                    .add_enabled(!self.shop.stock.is_empty(), copy)
+                    .on_hover_text("Copy the shop as Markdown, for session notes or Discord")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(shop_markdown(
+                        &self.shop.stock,
+                        &self.shop_summary(),
+                        &self.sorts,
+                    ));
+                    self.info_toast(ui.ctx(), "Shop copied to clipboard");
                 }
             });
         });
@@ -259,6 +274,47 @@ impl eframe::App for WerlenApp {
     }
 }
 
+/// the shop as a Markdown list per tab, in each tab's current sort order. Lists
+/// rather than tables, since Discord doesn't render tables
+fn shop_markdown(stock: &Stock, summary: &str, sorts: &[Option<Sort>]) -> String {
+    let mut out = format!("## Werlen's Wares\n{summary}\n");
+    for tab in Tab::ALL {
+        let Some(list) = tab.stock_list() else {
+            continue;
+        };
+        out += &format!("\n### {}\n", tab.title());
+        let mut rows = group_repeats(&stock[list]);
+        sort_rows(&mut rows, sorts[tab as usize]);
+        for StockRow { item, qty } in rows {
+            let qty = if qty > 1 {
+                format!("{qty}× ")
+            } else {
+                String::new()
+            };
+            let details: Vec<String> = [
+                Some(item.category.clone()),
+                tier_text(item, tab == Tab::Specials),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect();
+            let details = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", details.join(", "))
+            };
+            let price = if item.price == 0 {
+                "no price set".to_string()
+            } else {
+                format!("{} gp", thousands(item.price))
+            };
+            out += &format!("- {qty}**{}**{details} — {price}\n", item.name);
+        }
+    }
+    out
+}
+
 /// 1234567 -> "1,234,567"
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -275,6 +331,35 @@ fn thousands(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shop_as_markdown() {
+        use crate::shop::Rarity;
+
+        let item = |name: &str, category: &str, level, rarity, price| StockItem {
+            id: None,
+            name: name.to_string(),
+            category: category.to_string(),
+            price,
+            rarity,
+            level,
+        };
+        let mut stock = Stock::default();
+        stock[StockList::Scrolls] = vec![
+            item("Shield", "Abjuration", Some(1), None, 60),
+            item("Shield", "Abjuration", Some(1), None, 60),
+        ];
+        stock[StockList::Items] = vec![item("Rope", "", None, Some(Rarity::Common), 0)];
+        stock[StockList::Specials] = vec![item("Wish", "Conjuration", Some(9), None, 50_000)];
+
+        assert_eq!(
+            shop_markdown(&stock, "4 entries", &[None; Tab::ALL.len()]),
+            "## Werlen's Wares\n4 entries\n\
+             \n### Scrolls\n- 2× **Shield** (Abjuration, Level 1) — 60 gp\n\
+             \n### Items\n- **Rope** (Common) — no price set\n\
+             \n### Specials\n- **Wish** (Conjuration, Lvl 9 scroll) — 50,000 gp\n"
+        );
+    }
 
     #[test]
     fn thousands_separators() {
