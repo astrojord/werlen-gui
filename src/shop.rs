@@ -128,9 +128,12 @@ impl Shop {
         self.after_edit(result)
     }
 
-    pub fn delete_item(&mut self, id: i64) -> Result<(), String> {
+    /// delete an item; failures are reported through [`Shop::notice`]
+    pub fn delete_item(&mut self, id: i64) {
         let result = self.db.delete_item(id);
-        self.after_edit(result)
+        if let Err(err) = self.after_edit(result) {
+            self.notice = Some(Notice::Error(format!("couldn't delete item: {err}")));
+        }
     }
 
     fn after_edit(&mut self, result: rusqlite::Result<()>) -> Result<(), String> {
@@ -212,54 +215,33 @@ impl Shop {
     }
 }
 
-/// parse a stock CSV with columns name, price, category, rarity, level
+/// parse a stock CSV with columns name, price, category, rarity, level.
+/// Lenient: an unparseable price or level reads as 0, an unknown rarity as Common
 fn read_csv(path: &Path) -> Result<Vec<StockItem>, Box<dyn Error>> {
-    let mut items = Vec::new();
     let mut reader = csv::Reader::from_path(path)?;
-    for result in reader.records() {
-        let record = result?;
-
-        let name = record.get(0).unwrap_or_default().trim().to_string();
-        let price: usize = record
-            .get(1)
-            .unwrap_or_default()
-            .trim()
-            .parse()
-            .unwrap_or_default();
-        let category = record.get(2).unwrap_or_default().trim().to_string();
-        let rarity_str = record.get(3).unwrap_or_default().trim().to_lowercase();
-        let level_str = record.get(4).unwrap_or_default().trim();
-
-        let rarity = if rarity_str.is_empty() {
-            None
-        } else {
-            Some(match rarity_str.as_str() {
-                "uncommon" => Rarity::Uncommon,
-                "rare" => Rarity::Rare,
-                "very rare" => Rarity::VeryRare,
-                "legendary" => Rarity::Legendary,
-                _ => Rarity::Common,
+    reader
+        .records()
+        .map(|record| -> Result<StockItem, Box<dyn Error>> {
+            let record = record?;
+            let field = |i| record.get(i).unwrap_or_default().trim();
+            let level = match field(4) {
+                "" => None,
+                "c" | "C" => Some(0), // cantrip
+                level => Some(level.parse().unwrap_or_default()),
+            };
+            let rarity = Some(field(3))
+                .filter(|rarity| !rarity.is_empty())
+                .map(Rarity::parse);
+            Ok(StockItem {
+                id: None,
+                name: field(0).to_string(),
+                price: field(1).parse().unwrap_or_default(),
+                category: field(2).to_string(),
+                rarity,
+                level,
             })
-        };
-
-        let level = if level_str.is_empty() {
-            None
-        } else if level_str.eq_ignore_ascii_case("c") {
-            Some(0) // cantrip
-        } else {
-            Some(level_str.parse::<usize>().unwrap_or_default())
-        };
-
-        items.push(StockItem {
-            id: None,
-            name,
-            price,
-            category,
-            rarity,
-            level,
-        });
-    }
-    Ok(items)
+        })
+        .collect()
 }
 
 /// sort items into buckets by rarity (index 0 = Common .. 4 = Legendary)
@@ -384,6 +366,14 @@ impl Rarity {
         Rarity::VeryRare,
         Rarity::Legendary,
     ];
+
+    /// a rarity by its display name, ignoring case; anything unrecognised is Common
+    pub fn parse(name: &str) -> Rarity {
+        Rarity::ALL
+            .into_iter()
+            .find(|rarity| rarity.to_string().eq_ignore_ascii_case(name))
+            .unwrap_or_default()
+    }
 }
 
 impl fmt::Display for Rarity {

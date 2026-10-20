@@ -1,13 +1,15 @@
 //! the Catalogue tab: searching, importing, and editing the item database
 
 use egui::RichText;
-use egui_extras::{Column, TableBuilder};
+use egui_extras::Column;
 use egui_material_icons::icons::{ICON_ADD, ICON_DELETE, ICON_EDIT, ICON_SEARCH, ICON_UPLOAD_FILE};
 
 use super::style::{ERR_COLOR, rarity_combo, with_icon};
-use super::tables::{SortColumn, StockRow, item_cells, sort_header, sort_rows};
+use super::tables::{
+    StockRow, item_cells, item_columns, item_headers, row_height, sort_rows, table,
+};
 use super::{Tab, WerlenApp};
-use crate::shop::{MAX_SCROLL_LEVEL, Notice, Rarity, StockItem};
+use crate::shop::{MAX_SCROLL_LEVEL, Rarity, StockItem};
 
 /// most expensive thing the item form will let you price something at
 const PRICE_MAX: usize = 1_000_000;
@@ -138,24 +140,13 @@ impl WerlenApp {
             self.shop.catalogue.len()
         ));
 
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
+        let row_height = row_height(ui);
         let mut edit = None;
         let mut delete = None;
-        TableBuilder::new(ui)
-            .id_salt("catalogue")
-            .striped(true)
-            .resizable(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder().at_least(160.0))
-            .column(Column::initial(160.0).at_least(80.0))
-            .column(Column::initial(130.0).at_least(80.0))
-            .column(Column::initial(90.0).at_least(60.0))
-            .column(Column::auto())
+        item_columns(table(ui, "catalogue"))
+            .column(Column::auto()) // edit/delete buttons
             .header(row_height, |mut header| {
-                sort_header(&mut header, "Name", SortColumn::Name, sort, false);
-                sort_header(&mut header, "Category", SortColumn::Category, sort, false);
-                sort_header(&mut header, "Level/Rarity", SortColumn::Tier, sort, false);
-                sort_header(&mut header, "Price (gp)", SortColumn::Price, sort, true);
+                item_headers(&mut header, "Category", "Level/Rarity", sort);
                 header.col(|_| {});
             })
             .body(|body| {
@@ -298,10 +289,8 @@ impl WerlenApp {
 
         let (delete, cancel) = modal.inner;
         if delete {
-            if let Some(id) = item.id
-                && let Err(err) = self.shop.delete_item(id)
-            {
-                self.shop.notice = Some(Notice::Error(format!("couldn't delete item: {err}")));
+            if let Some(id) = item.id {
+                self.shop.delete_item(id);
             }
         } else if !(cancel || modal.should_close()) {
             self.pending_delete = Some(item);

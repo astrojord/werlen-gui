@@ -15,7 +15,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             ui::setup_fonts(&cc.egui_ctx);
-            Ok(Box::new(ui::WerlenApp::default()))
+            Ok(Box::new(ui::WerlenApp::new()))
         }),
     )
 }

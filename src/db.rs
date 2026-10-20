@@ -76,13 +76,13 @@ impl Db {
     /// every item in the catalogue, scrolls first by level, then items by rarity
     pub fn items(&self) -> rusqlite::Result<Vec<StockItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, category, price, rarity, level FROM items
+            "SELECT name, category, price, rarity, level, id FROM items
              ORDER BY level IS NULL, level, rarity, name COLLATE NOCASE",
         )?;
         stmt.query_map([], |row| {
             Ok(StockItem {
-                id: Some(row.get(0)?),
-                ..item_from_row(row, 1)?
+                id: Some(row.get(5)?),
+                ..item_from_row(row)?
             })
         })?
         .collect()
@@ -224,7 +224,7 @@ impl Db {
         let mut stock = Stock::default();
         for list in StockList::ALL {
             stock[list] = stmt
-                .query_map(params![list as u8], |row| item_from_row(row, 0))?
+                .query_map(params![list as u8], item_from_row)?
                 .collect::<rusqlite::Result<_>>()?;
         }
         let generated_at = self
@@ -272,15 +272,15 @@ impl Db {
     }
 }
 
-/// read name, category, price, rarity, level from consecutive columns starting at `start`
-fn item_from_row(row: &Row, start: usize) -> rusqlite::Result<StockItem> {
+/// read name, category, price, rarity, level from the first five columns
+fn item_from_row(row: &Row) -> rusqlite::Result<StockItem> {
     Ok(StockItem {
         id: None,
-        name: row.get(start)?,
-        category: row.get(start + 1)?,
-        price: row.get(start + 2)?,
-        rarity: row.get(start + 3)?,
-        level: row.get(start + 4)?,
+        name: row.get(0)?,
+        category: row.get(1)?,
+        price: row.get(2)?,
+        rarity: row.get(3)?,
+        level: row.get(4)?,
     })
 }
 

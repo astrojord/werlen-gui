@@ -78,8 +78,9 @@ pub struct WerlenApp {
     sorts: [Option<Sort>; Tab::ALL.len()],
 }
 
-impl Default for WerlenApp {
-    fn default() -> Self {
+impl WerlenApp {
+    /// opens (or creates) the database, so this touches disk
+    pub fn new() -> Self {
         Self {
             shop: Shop::open(),
             tab: Tab::default(),
@@ -92,9 +93,7 @@ impl Default for WerlenApp {
             sorts: [None; Tab::ALL.len()],
         }
     }
-}
 
-impl WerlenApp {
     fn generate(&mut self) {
         if !self.shop.generate_shop() {
             self.stock_error = true;

@@ -101,7 +101,7 @@ pub(super) fn sort_rows(rows: &mut [StockRow], sort: Option<Sort>) {
 }
 
 /// a clickable header cell that sorts by `column`
-pub(super) fn sort_header(
+fn sort_header(
     header: &mut egui_extras::TableRow,
     title: &str,
     column: SortColumn,
@@ -182,29 +182,52 @@ fn tier_badge(ui: &mut egui::Ui, item: &StockItem, verbose: bool) {
         });
 }
 
+pub(super) fn row_height(ui: &egui::Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Body) + 8.0
+}
+
+/// a striped, resizable table; callers add their columns
+pub(super) fn table<'a>(ui: &'a mut egui::Ui, id: &str) -> TableBuilder<'a> {
+    TableBuilder::new(ui)
+        .id_salt(id)
+        .striped(true)
+        .resizable(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+}
+
+/// the name, category, level/rarity, and price columns that [`item_cells`] fills
+pub(super) fn item_columns(table: TableBuilder<'_>) -> TableBuilder<'_> {
+    table
+        .column(Column::remainder().at_least(160.0))
+        .column(Column::initial(160.0).at_least(80.0))
+        .column(Column::initial(130.0).at_least(80.0))
+        .column(Column::initial(90.0).at_least(60.0))
+}
+
+/// sortable headers for [`item_columns`]
+pub(super) fn item_headers(
+    header: &mut egui_extras::TableRow,
+    category: &str,
+    tier: &str,
+    sort: &mut Option<Sort>,
+) {
+    sort_header(header, "Name", SortColumn::Name, sort, false);
+    sort_header(header, category, SortColumn::Category, sort, false);
+    sort_header(header, tier, SortColumn::Tier, sort, false);
+    sort_header(header, "Price (gp)", SortColumn::Price, sort, true);
+}
+
 pub(super) fn stock_table(ui: &mut egui::Ui, tab: Tab, rows: &[StockRow], sort: &mut Option<Sort>) {
     let (category, tier) = match tab {
         Tab::Scrolls => ("School", "Level"),
         Tab::Items => ("Category", "Rarity"),
         _ => ("Category", "Level/Rarity"),
     };
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
-    TableBuilder::new(ui)
-        .id_salt(tab.title())
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto().at_least(40.0))
-        .column(Column::remainder().at_least(160.0))
-        .column(Column::initial(160.0).at_least(80.0))
-        .column(Column::initial(130.0).at_least(80.0))
-        .column(Column::initial(90.0).at_least(60.0))
+    let row_height = row_height(ui);
+    item_columns(table(ui, tab.title()).column(Column::auto().at_least(40.0)))
         .header(row_height, |mut header| {
             sort_header(&mut header, "Qty", SortColumn::Qty, sort, true);
-            sort_header(&mut header, "Name", SortColumn::Name, sort, false);
-            sort_header(&mut header, category, SortColumn::Category, sort, false);
-            sort_header(&mut header, tier, SortColumn::Tier, sort, false);
-            sort_header(&mut header, "Price (gp)", SortColumn::Price, sort, true);
+            item_headers(&mut header, category, tier, sort);
         })
         .body(|body| {
             body.rows(row_height, rows.len(), |mut row| {
