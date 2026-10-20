@@ -185,7 +185,8 @@ impl WerlenApp {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.heading(RichText::new("Werlen's wares").strong());
+                banner(ui);
+                ui.add_space(2.0);
                 ui.weak(self.shop_summary());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -766,6 +767,36 @@ fn open_in_file_manager(dir: &Path) -> std::io::Result<()> {
         .arg(dir)
         .spawn()
         .map(drop)
+}
+
+/// the block-letter WERLEN'S banner from the TUI
+const BANNER: &str = include_str!("../assets/werlen_ascii.txt");
+const BANNER_SIZE: f32 = 12.0;
+
+/// draw [`BANNER`] in gold, with lines packed tight so the block characters join up
+fn banner(ui: &mut egui::Ui) {
+    let color = if ui.visuals().dark_mode {
+        ACCENT
+    } else {
+        Color32::from_rgb(170, 100, 0)
+    };
+    let format = |color| egui::TextFormat {
+        font_id: egui::FontId::monospace(BANNER_SIZE),
+        color,
+        line_height: Some(BANNER_SIZE),
+        ..Default::default()
+    };
+    // the ░ background shading is drawn faint so the letters stand out
+    let mut job = egui::text::LayoutJob::default();
+    for ch in BANNER.trim_end().chars() {
+        let color = if ch == '░' {
+            color.gamma_multiply(0.25)
+        } else {
+            color
+        };
+        job.append(ch.encode_utf8(&mut [0; 4]), 0.0, format(color));
+    }
+    ui.label(job).on_hover_text("Werlen's Ware Generator");
 }
 
 /// the big accent-coloured Generate shop button
