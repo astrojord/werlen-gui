@@ -1,0 +1,20 @@
+[package]
+name = "werlen-gui"
+version = "0.1.0"
+description = "werlen item shop gen (egui)"
+authors = ["Jordan Sheely <astrojord@gmail.com>"]
+license = "MIT"
+edition = "2024"
+
+[dependencies]
+csv = "1.4"
+eframe = "0.37"
+egui = "0.37"
+egui_extras = "0.37"
+rand = "0.10.1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
