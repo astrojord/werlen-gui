@@ -8,7 +8,6 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::shop::{MAX_SCROLL_LEVEL, Notice, POOL_MAX, Rarity, Shop, StockItem};
 
-const OK_COLOR: Color32 = Color32::from_rgb(90, 190, 110);
 const ERR_COLOR: Color32 = Color32::from_rgb(230, 80, 80);
 /// fill for the primary Generate button
 const ACCENT: Color32 = Color32::from_rgb(255, 200, 100);
@@ -322,7 +321,10 @@ impl WerlenApp {
                                         dismissed = Some(i);
                                     }
                                 } else {
-                                    ui.colored_label(OK_COLOR, format!("✔ {}", toast.text));
+                                    ui.colored_label(
+                                        ok_color(ui.visuals().dark_mode),
+                                        format!("✔ {}", toast.text),
+                                    );
                                 }
                             });
                         });
@@ -465,65 +467,93 @@ impl WerlenApp {
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
-        let settings = &mut self.shop.settings;
         let mut open_folder = false;
-        egui::Grid::new("settings")
-            .num_columns(2)
-            .spacing([24.0, 10.0])
-            .striped(true)
-            .show(ui, |ui| {
-                ui.label("Max scrolls");
-                ui.add(egui::DragValue::new(&mut settings.max_scrolls).range(0..=POOL_MAX));
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let settings = &mut self.shop.settings;
+
+            settings_section(ui, "Scrolls", |ui| {
+                setting_label(ui, "Number of scrolls", "How many scrolls the Scrolls tab stocks");
+                ui.add(egui::Slider::new(&mut settings.max_scrolls, 0..=POOL_MAX));
                 ui.end_row();
 
-                ui.label("Max scroll level");
-                ui.add(
-                    egui::DragValue::new(&mut settings.max_scroll_level)
-                        .range(0..=MAX_SCROLL_LEVEL),
+                setting_label(
+                    ui,
+                    "Highest level",
+                    "Scrolls are drawn from cantrips up to this level, weighted towards lower levels",
                 );
+                ui.add(level_slider(&mut settings.max_scroll_level));
+                ui.end_row();
+            });
+
+            settings_section(ui, "Items", |ui| {
+                setting_label(ui, "Number of items", "How many items the Items tab stocks");
+                ui.add(egui::Slider::new(&mut settings.max_items, 0..=POOL_MAX));
                 ui.end_row();
 
-                ui.label("Min special scroll level");
-                ui.add(
-                    egui::DragValue::new(&mut settings.min_special_scroll_level)
-                        .range(0..=MAX_SCROLL_LEVEL),
+                setting_label(
+                    ui,
+                    "Highest rarity",
+                    "Items are drawn from Common up to this rarity, weighted towards lower rarities",
                 );
-                ui.end_row();
-
-                ui.label("Max items");
-                ui.add(egui::DragValue::new(&mut settings.max_items).range(0..=POOL_MAX));
-                ui.end_row();
-
-                ui.label("Max item rarity");
                 rarity_combo(ui, "max_item_rarity", &mut settings.max_item_rarity, ..);
                 ui.end_row();
+            });
 
-                ui.label("Max specials");
-                ui.add(egui::DragValue::new(&mut settings.max_specials).range(0..=POOL_MAX));
-                ui.end_row();
-
-                // min/max special rarity can't cross each other
-                ui.label("Min special rarity");
-                let max = settings.max_special_rarity;
-                rarity_combo(
+            settings_section(ui, "Specials", |ui| {
+                setting_label(
                     ui,
-                    "min_special_rarity",
-                    &mut settings.min_special_rarity,
-                    ..=max,
+                    "Number of specials",
+                    "How many entries the Specials tab stocks, from both items and scrolls",
                 );
+                ui.add(egui::Slider::new(&mut settings.max_specials, 0..=POOL_MAX));
                 ui.end_row();
 
-                ui.label("Max special rarity");
-                let min = settings.min_special_rarity;
-                rarity_combo(
+                setting_label(
                     ui,
-                    "max_special_rarity",
-                    &mut settings.max_special_rarity,
-                    min..,
+                    "Item rarities",
+                    "Special items are drawn from this rarity range",
                 );
+                ui.horizontal(|ui| {
+                    // min/max special rarity can't cross each other
+                    let max = settings.max_special_rarity;
+                    rarity_combo(
+                        ui,
+                        "min_special_rarity",
+                        &mut settings.min_special_rarity,
+                        ..=max,
+                    );
+                    ui.label("to");
+                    let min = settings.min_special_rarity;
+                    rarity_combo(
+                        ui,
+                        "max_special_rarity",
+                        &mut settings.max_special_rarity,
+                        min..,
+                    );
+                });
                 ui.end_row();
 
-                ui.label("Database");
+                setting_label(
+                    ui,
+                    "Lowest scroll level",
+                    "Special scrolls are drawn from this level up to 9",
+                );
+                ui.add(level_slider(&mut settings.min_special_scroll_level));
+                ui.end_row();
+            });
+
+            settings_section(ui, "Appearance", |ui| {
+                setting_label(ui, "Theme", "Follow the system theme, or force light or dark");
+                egui::global_theme_preference_buttons(ui);
+                ui.end_row();
+            });
+
+            settings_section(ui, "Database", |ui| {
+                setting_label(
+                    ui,
+                    "Location",
+                    "Catalogue, settings, and the last shop are stored here",
+                );
                 ui.horizontal(|ui| match &self.shop.db_path {
                     Some(path) => {
                         ui.monospace(path.display().to_string());
@@ -535,6 +565,7 @@ impl WerlenApp {
                 });
                 ui.end_row();
             });
+        });
 
         if open_folder
             && let Some(dir) = self.shop.db_path.as_deref().and_then(Path::parent)
@@ -894,19 +925,25 @@ fn item_cells(row: &mut egui_extras::TableRow, item: &StockItem, verbose: bool) 
     row.col(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(SCROLLBAR_GUTTER);
-            ui.label(thousands(item.price));
+            // a 0 price in the stock data means nobody set one, not that it's free
+            if item.price == 0 {
+                ui.weak("—").on_hover_text("No price set");
+            } else {
+                ui.label(thousands(item.price));
+            }
         });
     });
 }
 
 /// coloured pill showing an item's rarity or a scroll's level
 fn tier_badge(ui: &mut egui::Ui, item: &StockItem, verbose: bool) {
+    let dark = ui.visuals().dark_mode;
     let (text, color) = match (item.rarity, item.level) {
-        (Some(rarity), _) => (rarity.to_string(), rarity_color(rarity)),
-        (None, Some(0)) if verbose => ("Cantrip scroll".to_string(), spell_color(0)),
-        (None, Some(0)) => ("Cantrip".to_string(), spell_color(0)),
-        (None, Some(level)) if verbose => (format!("Lvl {level} scroll"), spell_color(level)),
-        (None, Some(level)) => (format!("Level {level}"), spell_color(level)),
+        (Some(rarity), _) => (rarity.to_string(), rarity_color(rarity, dark)),
+        (None, Some(0)) if verbose => ("Cantrip scroll".to_string(), spell_color(0, dark)),
+        (None, Some(0)) => ("Cantrip".to_string(), spell_color(0, dark)),
+        (None, Some(level)) if verbose => (format!("Lvl {level} scroll"), spell_color(level, dark)),
+        (None, Some(level)) => (format!("Level {level}"), spell_color(level, dark)),
         (None, None) => return,
     };
     egui::Frame::new()
@@ -960,6 +997,42 @@ fn stock_table(ui: &mut egui::Ui, tab: Tab, rows: &[StockRow], sort: &mut Option
         });
 }
 
+/// a titled block of two-column settings rows
+fn settings_section(ui: &mut egui::Ui, title: &str, add_rows: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(title).strong().size(16.0));
+    ui.separator();
+    egui::Grid::new(title)
+        .num_columns(2)
+        .min_col_width(180.0)
+        .spacing([24.0, 10.0])
+        .show(ui, add_rows);
+    ui.add_space(10.0);
+}
+
+fn setting_label(ui: &mut egui::Ui, text: &str, help: &str) {
+    ui.label(text).on_hover_text(help);
+}
+
+/// 0..=9 spell level slider that shows 0 as "Cantrip"
+fn level_slider(level: &mut usize) -> egui::Slider<'_> {
+    egui::Slider::new(level, 0..=MAX_SCROLL_LEVEL)
+        .custom_formatter(|n, _| {
+            if n == 0.0 {
+                "Cantrip".to_string()
+            } else {
+                n.to_string()
+            }
+        })
+        .custom_parser(|text| {
+            if text.trim().eq_ignore_ascii_case("cantrip") {
+                Some(0.0)
+            } else {
+                text.trim().parse().ok()
+            }
+        })
+}
+
 /// rarity dropdown restricted to the given range
 fn rarity_combo(
     ui: &mut egui::Ui,
@@ -967,34 +1040,48 @@ fn rarity_combo(
     value: &mut Rarity,
     allowed: impl std::ops::RangeBounds<Rarity>,
 ) {
+    let dark = ui.visuals().dark_mode;
     egui::ComboBox::from_id_salt(id)
-        .selected_text(RichText::new(value.to_string()).color(rarity_color(*value)))
+        .selected_text(RichText::new(value.to_string()).color(rarity_color(*value, dark)))
         .show_ui(ui, |ui| {
             for rarity in Rarity::ALL.into_iter().filter(|r| allowed.contains(r)) {
-                let text = RichText::new(rarity.to_string()).color(rarity_color(rarity));
+                let text = RichText::new(rarity.to_string()).color(rarity_color(rarity, dark));
                 ui.selectable_value(value, rarity, text);
             }
         });
 }
 
-/// Translate level/rarity to color
-fn rarity_color(rarity: Rarity) -> Color32 {
-    match rarity {
-        Rarity::Common => Color32::from_rgb(150, 150, 150),
-        Rarity::Uncommon => Color32::from_rgb(60, 180, 75),
-        Rarity::Rare => Color32::from_rgb(40, 160, 210),
-        Rarity::VeryRare => Color32::from_rgb(180, 90, 220),
-        Rarity::Legendary => Color32::from_rgb(230, 160, 30),
-    }
+/// Translate rarity to color, picked to stay legible on the current theme
+fn rarity_color(rarity: Rarity, dark_mode: bool) -> Color32 {
+    let (dark, light) = match rarity {
+        Rarity::Common => ((185, 190, 200), (95, 100, 110)),
+        Rarity::Uncommon => ((80, 200, 100), (25, 125, 45)),
+        Rarity::Rare => ((70, 170, 240), (15, 100, 175)),
+        Rarity::VeryRare => ((195, 120, 240), (125, 45, 175)),
+        Rarity::Legendary => ((240, 175, 50), (170, 100, 0)),
+    };
+    let (r, g, b) = if dark_mode { dark } else { light };
+    Color32::from_rgb(r, g, b)
 }
 
-fn spell_color(level: usize) -> Color32 {
-    match level {
-        0 | 1 => rarity_color(Rarity::Common),
-        2 | 3 => rarity_color(Rarity::Uncommon),
-        4 | 5 => rarity_color(Rarity::Rare),
-        6..=8 => rarity_color(Rarity::VeryRare),
-        _ => rarity_color(Rarity::Legendary),
+/// scroll levels share the rarity palette, in bands
+fn spell_color(level: usize, dark_mode: bool) -> Color32 {
+    let rarity = match level {
+        0 | 1 => Rarity::Common,
+        2 | 3 => Rarity::Uncommon,
+        4 | 5 => Rarity::Rare,
+        6..=8 => Rarity::VeryRare,
+        _ => Rarity::Legendary,
+    };
+    rarity_color(rarity, dark_mode)
+}
+
+/// success green, darker on light backgrounds
+fn ok_color(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(90, 190, 110)
+    } else {
+        Color32::from_rgb(30, 130, 55)
     }
 }
 
