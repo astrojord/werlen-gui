@@ -70,7 +70,7 @@ impl Shop {
             special_stock: Vec::new(),
         };
         if let Err(err) = shop.load() {
-            shop.status = StockStatus::Error(err.to_string());
+            shop.status = StockStatus::Error(format!("couldn't load the database: {err}"));
         }
         shop
     }
