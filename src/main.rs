@@ -14,7 +14,7 @@ fn main() -> eframe::Result {
         "werlen-gui",
         options,
         Box::new(|cc| {
-            egui_material_icons::initialize(&cc.egui_ctx);
+            ui::setup_fonts(&cc.egui_ctx);
             Ok(Box::new(ui::WerlenApp::default()))
         }),
     )

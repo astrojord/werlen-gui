@@ -3,7 +3,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::{Local, TimeZone};
-use egui::{Color32, RichText, ThemePreference};
+use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+use egui::{Color32, FontData, FontFamily, RichText, ThemePreference};
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::MaterialIcon;
 use egui_material_icons::icons::{
@@ -24,6 +25,15 @@ const TOAST_FADE_SECS: f64 = 0.6;
 
 /// room left at the right edge of tables so the floating scrollbar doesn't cover prices
 const SCROLLBAR_GUTTER: f32 = 10.0;
+
+/// text sizes for W95FA, which runs small for its nominal size
+const TEXT_SIZE: f32 = 12.5;
+const SMALL_SIZE: f32 = 11.0;
+const HEADING_SIZE: f32 = 20.0;
+const SECTION_SIZE: f32 = 17.0;
+const TAB_SIZE: f32 = 15.0;
+const GENERATE_SIZE: f32 = 18.0;
+const FONT_W95FA: &[u8] = include_bytes!("../assets/fonts/w95fa.otf");
 
 /// most expensive thing the item form will let you price something at
 const PRICE_MAX: usize = 1_000_000;
@@ -213,13 +223,13 @@ impl WerlenApp {
                     Tab::Items => self.shop.item_stock.len(),
                     _ => self.shop.special_stock.len(),
                 };
-                let label = RichText::new(format!("{} ({count})", tab.title())).size(15.0);
+                let label = RichText::new(format!("{} ({count})", tab.title())).size(TAB_SIZE);
                 ui.selectable_value(&mut self.tab, tab, label);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // right to left, so reversed
                 for tab in Tab::ALL.into_iter().rev().filter(|t| !t.is_shop()) {
-                    let label = RichText::new(tab.title()).size(15.0);
+                    let label = RichText::new(tab.title()).size(TAB_SIZE);
                     ui.selectable_value(&mut self.tab, tab, label);
                 }
             });
@@ -779,6 +789,33 @@ fn open_in_file_manager(dir: &Path) -> std::io::Result<()> {
         .map(drop)
 }
 
+/// register the W95FA text font and Material icons, and set text style sizes.
+/// The monospace font (used by the banner) is left alone
+pub fn setup_fonts(ctx: &egui::Context) {
+    egui_material_icons::initialize(ctx);
+    ctx.add_font(FontInsert::new(
+        "w95fa",
+        FontData::from_static(FONT_W95FA),
+        vec![InsertFontFamily {
+            family: FontFamily::Proportional,
+            priority: FontPriority::Highest,
+        }],
+    ));
+    ctx.all_styles_mut(|style| {
+        use egui::TextStyle;
+        for (text_style, size) in [
+            (TextStyle::Small, SMALL_SIZE),
+            (TextStyle::Body, TEXT_SIZE),
+            (TextStyle::Button, TEXT_SIZE),
+            (TextStyle::Heading, HEADING_SIZE),
+        ] {
+            style
+                .text_styles
+                .insert(text_style, egui::FontId::proportional(size));
+        }
+    });
+}
+
 /// "<icon> text", for buttons and labels; the icon font is a fallback for
 /// ordinary text, so the codepoint renders inline
 fn with_icon(icon: MaterialIcon, text: &str) -> String {
@@ -837,7 +874,7 @@ fn banner(ui: &mut egui::Ui) {
 fn generate_button(ui: &mut egui::Ui) -> egui::Response {
     let button = egui::Button::new(
         RichText::new(with_icon(ICON_WAND_STARS, "Generate shop"))
-            .size(16.0)
+            .size(GENERATE_SIZE)
             .strong()
             .color(Color32::BLACK),
     )
@@ -1065,7 +1102,7 @@ fn stock_table(ui: &mut egui::Ui, tab: Tab, rows: &[StockRow], sort: &mut Option
 /// a titled block of two-column settings rows
 fn settings_section(ui: &mut egui::Ui, title: &str, add_rows: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(6.0);
-    ui.label(RichText::new(title).strong().size(16.0));
+    ui.label(RichText::new(title).strong().size(SECTION_SIZE));
     ui.separator();
     egui::Grid::new(title)
         .num_columns(2)
