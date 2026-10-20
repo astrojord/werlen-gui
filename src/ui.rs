@@ -773,12 +773,12 @@ fn open_in_file_manager(dir: &Path) -> std::io::Result<()> {
 const BANNER: &str = include_str!("../assets/werlen_ascii.txt");
 const BANNER_SIZE: f32 = 12.0;
 
-/// draw [`BANNER`] in gold, with lines packed tight so the block characters join up
+/// draw [`BANNER`] in purple, with lines packed tight so the block characters join up
 fn banner(ui: &mut egui::Ui) {
     let color = if ui.visuals().dark_mode {
-        ACCENT
+        Color32::from_rgb(185, 140, 255)
     } else {
-        Color32::from_rgb(170, 100, 0)
+        Color32::from_rgb(105, 55, 180)
     };
     let format = |color| egui::TextFormat {
         font_id: egui::FontId::monospace(BANNER_SIZE),
