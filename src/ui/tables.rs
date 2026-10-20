@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 
 use egui::RichText;
 use egui_extras::{Column, TableBuilder};
-use egui_material_icons::icons::{ICON_ARROW_DROP_DOWN, ICON_ARROW_DROP_UP};
+use egui_material_icons::icons::{ICON_ARROW_DROP_DOWN, ICON_ARROW_DROP_UP, ICON_AUTORENEW};
 
 use super::Tab;
 use super::style::{rarity_color, spell_color};
@@ -25,12 +25,7 @@ pub(super) struct StockRow<'a> {
 pub(super) fn group_repeats(stock: &[StockItem]) -> Vec<StockRow<'_>> {
     let mut rows: Vec<StockRow> = Vec::new();
     for item in stock {
-        let existing = rows.iter_mut().find(|row| {
-            row.item.name.eq_ignore_ascii_case(&item.name)
-                && row.item.rarity == item.rarity
-                && row.item.level == item.level
-        });
-        match existing {
+        match rows.iter_mut().find(|row| row.item.same_entry(item)) {
             Some(row) => row.qty += 1,
             None => rows.push(StockRow { item, qty: 1 }),
         }
@@ -228,17 +223,28 @@ pub(super) fn item_headers(
     sort_header(header, "Price (gp)", SortColumn::Price, sort, true);
 }
 
-pub(super) fn stock_table(ui: &mut egui::Ui, tab: Tab, rows: &[StockRow], sort: &mut Option<Sort>) {
+/// returns the entry whose reroll button was clicked, if any. The button is
+/// greyed out for entries `can_reroll` says no to
+pub(super) fn stock_table<'a>(
+    ui: &mut egui::Ui,
+    tab: Tab,
+    rows: &[StockRow<'a>],
+    sort: &mut Option<Sort>,
+    can_reroll: impl Fn(&StockItem) -> bool,
+) -> Option<&'a StockItem> {
     let (category, tier) = match tab {
         Tab::Scrolls => ("School", "Level"),
         Tab::Items => ("Category", "Rarity"),
         _ => ("Category", "Level/Rarity"),
     };
     let row_height = row_height(ui);
+    let mut reroll = None;
     item_columns(table(ui, tab.title()).column(Column::auto().at_least(40.0)))
+        .column(Column::auto()) // reroll button
         .header(row_height, |mut header| {
             sort_header(&mut header, "Qty", SortColumn::Qty, sort, true);
             item_headers(&mut header, category, tier, sort);
+            header.col(|_| {});
         })
         .body(|body| {
             body.rows(row_height, rows.len(), |mut row| {
@@ -253,8 +259,25 @@ pub(super) fn stock_table(ui: &mut egui::Ui, tab: Tab, rows: &[StockRow], sort: 
                     });
                 });
                 item_cells(&mut row, item, tab == Tab::Specials);
+                row.col(|ui| {
+                    let hover = if qty > 1 {
+                        "Reroll: swap each copy for another pick of the same tier"
+                    } else {
+                        "Reroll: swap for another pick of the same tier"
+                    };
+                    let button = egui::Button::new(ICON_AUTORENEW).small();
+                    if ui
+                        .add_enabled(can_reroll(item), button)
+                        .on_hover_text(hover)
+                        .on_disabled_hover_text("Nothing else in the catalogue at this tier")
+                        .clicked()
+                    {
+                        reroll = Some(item);
+                    }
+                });
             });
         });
+    reroll
 }
 
 #[cfg(test)]

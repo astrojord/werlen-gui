@@ -208,10 +208,43 @@ impl Shop {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs() as i64);
         self.generated_at = Some(generated_at);
-        if let Err(err) = self.db.save_shop(&self.stock, generated_at) {
+        if let Err(err) = self.db.save_shop(&self.stock, Some(generated_at)) {
             self.notice = Some(Notice::Error(format!("couldn't save the shop: {err}")));
         }
         true
+    }
+
+    /// catalogue entries `entry` could be rerolled into: same rarity or scroll
+    /// level, but not the same entry
+    fn reroll_options<'a>(&'a self, entry: &'a StockItem) -> impl Iterator<Item = &'a StockItem> {
+        self.catalogue
+            .iter()
+            .filter(|c| c.tier_key() == entry.tier_key() && !c.same_entry(entry))
+    }
+
+    pub fn can_reroll(&self, entry: &StockItem) -> bool {
+        self.reroll_options(entry).next().is_some()
+    }
+
+    /// swap every copy of `entry` in `list` for a fresh pick of the same rarity
+    /// or scroll level, never the same entry. Each copy is drawn separately, and
+    /// keeps its place in the list. Does nothing if [`Self::can_reroll`] is false
+    pub fn reroll(&mut self, list: StockList, entry: &StockItem) {
+        let options: Vec<StockItem> = self.reroll_options(entry).cloned().collect();
+        if options.is_empty() {
+            return;
+        }
+
+        let mut rng = rand::rng();
+        for stocked in self.stock[list].iter_mut().filter(|s| s.same_entry(entry)) {
+            *stocked = options
+                .choose(&mut rng)
+                .expect("options isn't empty")
+                .clone();
+        }
+        if let Err(err) = self.db.save_shop(&self.stock, self.generated_at) {
+            self.notice = Some(Notice::Error(format!("couldn't save the shop: {err}")));
+        }
     }
 }
 
@@ -435,6 +468,13 @@ impl StockItem {
             (None, None) => (2, 0),
         }
     }
+
+    /// same catalogue entry: name (ignoring case), rarity, and level all match
+    pub fn same_entry(&self, other: &StockItem) -> bool {
+        self.name.eq_ignore_ascii_case(&other.name)
+            && self.rarity == other.rarity
+            && self.level == other.level
+    }
 }
 
 #[cfg(test)]
@@ -594,6 +634,27 @@ mod tests {
                 other => panic!("unexpected special {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn reroll_swaps_every_copy_within_the_tier() {
+        let mut shop = stocked_shop(1);
+        let fireball = item("Fireball", None, Some(3));
+        let shield = item("Shield", None, Some(1));
+        shop.stock[StockList::Scrolls] = vec![shield.clone(), fireball.clone(), fireball.clone()];
+
+        // the only other level 3 scroll is "level 3 scroll 0"
+        assert!(shop.can_reroll(&fireball));
+        shop.reroll(StockList::Scrolls, &fireball);
+        let names: Vec<&str> = shop.stock[StockList::Scrolls]
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["Shield", "level 3 scroll 0", "level 3 scroll 0"]);
+
+        // the stocked shop's level 1 scroll is the only one at its level
+        let lone = item("level 1 scroll 0", None, Some(1));
+        assert!(!shop.can_reroll(&lone));
     }
 
     #[test]

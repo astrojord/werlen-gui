@@ -229,7 +229,11 @@ impl WerlenApp {
         let mut rows = group_repeats(&self.shop.stock[list]);
         let sort = &mut self.sorts[tab as usize];
         sort_rows(&mut rows, *sort);
-        stock_table(ui, tab, &rows, sort);
+        let shop = &self.shop;
+        let reroll = stock_table(ui, tab, &rows, sort, |item| shop.can_reroll(item)).cloned();
+        if let Some(entry) = reroll {
+            self.shop.reroll(list, &entry);
+        }
     }
 
     fn stock_error_modal(&mut self, ctx: &egui::Context) {

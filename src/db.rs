@@ -241,8 +241,8 @@ impl Db {
         })
     }
 
-    /// replace the saved shop with `stock`, generated at `generated_at` (unix seconds)
-    pub fn save_shop(&mut self, stock: &Stock, generated_at: i64) -> rusqlite::Result<()> {
+    /// replace the saved shop with `stock`, generated at `generated_at` (unix seconds, if known)
+    pub fn save_shop(&mut self, stock: &Stock, generated_at: Option<i64>) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM shop_stock", [])?;
         tx.execute(
@@ -429,7 +429,7 @@ mod tests {
             item("Fireball", None, Some(3), 300),
         ];
         stock[StockList::Items] = vec![item("Bag of Holding", Some(Rarity::Uncommon), None, 1000)];
-        db.save_shop(&stock, 1_000).unwrap();
+        db.save_shop(&stock, Some(1_000)).unwrap();
 
         let saved = db.load_shop().unwrap();
         assert_eq!(saved.generated_at, Some(1_000));
@@ -445,7 +445,7 @@ mod tests {
 
         // saving again replaces rather than appends
         stock[StockList::Scrolls].clear();
-        db.save_shop(&stock, 2_000).unwrap();
+        db.save_shop(&stock, Some(2_000)).unwrap();
         let saved = db.load_shop().unwrap();
         assert_eq!(saved.generated_at, Some(2_000));
         assert!(saved.stock[StockList::Scrolls].is_empty());
