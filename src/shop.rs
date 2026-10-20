@@ -113,6 +113,7 @@ impl Shop {
             };
 
             let new_stock_item = StockItem {
+                id: None,
                 name,
                 price,
                 category,
@@ -298,8 +299,38 @@ impl fmt::Display for Rarity {
     }
 }
 
+/// how many of what to put in the shop
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settings {
+    pub max_scrolls: usize,
+    pub max_scroll_level: usize,
+    pub min_special_scroll_level: usize,
+    pub max_items: usize,
+    pub max_item_rarity: Rarity,
+    pub max_specials: usize,
+    pub min_special_rarity: Rarity,
+    pub max_special_rarity: Rarity,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            max_scrolls: 20,
+            max_scroll_level: 3,
+            min_special_scroll_level: 4,
+            max_items: 10,
+            max_item_rarity: Rarity::Uncommon,
+            max_specials: 5,
+            min_special_rarity: Rarity::Rare,
+            max_special_rarity: Rarity::VeryRare,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StockItem {
+    /// row id in the items table; None for items not (yet) in the catalogue
+    pub id: Option<i64>,
     pub level: Option<usize>,
     pub rarity: Option<Rarity>,
     pub name: String,

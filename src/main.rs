@@ -1,3 +1,4 @@
+mod db;
 mod shop;
 mod ui;
 
