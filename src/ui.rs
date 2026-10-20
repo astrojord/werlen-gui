@@ -7,9 +7,9 @@ use egui::{Color32, RichText, ThemePreference};
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::MaterialIcon;
 use egui_material_icons::icons::{
-    ICON_ADD, ICON_ARROW_DROP_DOWN, ICON_ARROW_DROP_UP, ICON_BRIGHTNESS_AUTO, ICON_CASINO,
-    ICON_CHECK_CIRCLE, ICON_DARK_MODE, ICON_DELETE, ICON_EDIT, ICON_ERROR, ICON_FOLDER_OPEN,
-    ICON_LIGHT_MODE, ICON_SEARCH, ICON_UPLOAD_FILE,
+    ICON_ADD, ICON_ARROW_DROP_DOWN, ICON_ARROW_DROP_UP, ICON_BRIGHTNESS_AUTO, ICON_CHECK_CIRCLE,
+    ICON_DARK_MODE, ICON_DELETE, ICON_EDIT, ICON_ERROR, ICON_FOLDER_OPEN, ICON_LIGHT_MODE,
+    ICON_SEARCH, ICON_UPLOAD_FILE, ICON_WAND_STARS,
 };
 
 use crate::shop::{MAX_SCROLL_LEVEL, Notice, POOL_MAX, Rarity, Shop, StockItem};
@@ -836,7 +836,7 @@ fn banner(ui: &mut egui::Ui) {
 /// the big accent-coloured Generate shop button
 fn generate_button(ui: &mut egui::Ui) -> egui::Response {
     let button = egui::Button::new(
-        RichText::new(with_icon(ICON_CASINO, "Generate shop"))
+        RichText::new(with_icon(ICON_WAND_STARS, "Generate shop"))
             .size(16.0)
             .strong()
             .color(Color32::BLACK),
