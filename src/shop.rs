@@ -13,7 +13,7 @@ use crate::db::{Db, ImportSummary};
 pub const MAX_SCROLL_LEVEL: usize = 9;
 
 /// upper bound on the size of any one stock list
-pub const POOL_MAX: usize = 128;
+pub const MAX_STOCK_COUNT: usize = 128;
 
 pub struct Shop {
     db: Db,
@@ -268,13 +268,12 @@ fn bucket_by_level(pool: &[StockItem]) -> Vec<Vec<&StockItem>> {
 
 /// assign weights to rarity levels out of 100
 fn rarity_weight(rarity_index: usize) -> u32 {
-    const WEIGHTS: [u32; 5] = [30, 25, 20, 15, 10];
-    WEIGHTS.get(rarity_index).copied().unwrap_or(1)
+    [30, 25, 20, 15, 10][rarity_index]
 }
 
 /// assign weights to scroll levels (10 - level)
 fn scroll_level_weight(level: usize) -> u32 {
-    ((MAX_SCROLL_LEVEL + 1).saturating_sub(level) as u32).max(1)
+    (MAX_SCROLL_LEVEL + 1 - level) as u32
 }
 
 /// a tier's draw weight and the entries in it

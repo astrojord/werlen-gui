@@ -7,8 +7,36 @@ use egui_material_icons::icons::ICON_WAND_STARS;
 
 use crate::shop::Rarity;
 
+/// a colour with a variant for each theme
+#[derive(Clone, Copy)]
+pub(super) struct Themed {
+    dark: Color32,
+    light: Color32,
+}
+
+impl Themed {
+    const fn rgb(dark: (u8, u8, u8), light: (u8, u8, u8)) -> Self {
+        Self {
+            dark: Color32::from_rgb(dark.0, dark.1, dark.2),
+            light: Color32::from_rgb(light.0, light.1, light.2),
+        }
+    }
+
+    /// the variant for `ui`'s current theme
+    pub(super) fn get(self, ui: &egui::Ui) -> Color32 {
+        if ui.visuals().dark_mode {
+            self.dark
+        } else {
+            self.light
+        }
+    }
+}
+
+/// error red, legible on both themes as is
 pub(super) const ERR_COLOR: Color32 = Color32::from_rgb(230, 80, 80);
-/// fill for the primary Generate button
+pub(super) const OK_COLOR: Themed = Themed::rgb((90, 190, 110), (30, 130, 55));
+const BANNER_COLOR: Themed = Themed::rgb((185, 140, 255), (105, 55, 180));
+/// fill for the primary Generate button (its text is black on either theme)
 const ACCENT: Color32 = Color32::from_rgb(255, 200, 100);
 
 /// text sizes for W95FA, which runs small for its nominal size
@@ -59,11 +87,7 @@ const BANNER_SIZE: f32 = 12.0;
 
 /// draw [`BANNER`] in purple, with lines packed tight so the block characters join up
 pub(super) fn banner(ui: &mut egui::Ui) {
-    let color = if ui.visuals().dark_mode {
-        Color32::from_rgb(185, 140, 255)
-    } else {
-        Color32::from_rgb(105, 55, 180)
-    };
+    let color = BANNER_COLOR.get(ui);
     let format = |color| egui::TextFormat {
         font_id: egui::FontId::monospace(BANNER_SIZE),
         color,
@@ -103,32 +127,29 @@ pub(super) fn rarity_combo(
     value: &mut Rarity,
     allowed: impl std::ops::RangeBounds<Rarity>,
 ) {
-    let dark = ui.visuals().dark_mode;
     egui::ComboBox::from_id_salt(id)
-        .selected_text(RichText::new(value.to_string()).color(rarity_color(*value, dark)))
+        .selected_text(RichText::new(value.to_string()).color(rarity_color(*value).get(ui)))
         .show_ui(ui, |ui| {
             for rarity in Rarity::ALL.into_iter().filter(|r| allowed.contains(r)) {
-                let text = RichText::new(rarity.to_string()).color(rarity_color(rarity, dark));
+                let text = RichText::new(rarity.to_string()).color(rarity_color(rarity).get(ui));
                 ui.selectable_value(value, rarity, text);
             }
         });
 }
 
-/// Translate rarity to color, picked to stay legible on the current theme
-pub(super) fn rarity_color(rarity: Rarity, dark_mode: bool) -> Color32 {
-    let (dark, light) = match rarity {
-        Rarity::Common => ((185, 190, 200), (95, 100, 110)),
-        Rarity::Uncommon => ((80, 200, 100), (25, 125, 45)),
-        Rarity::Rare => ((70, 170, 240), (15, 100, 175)),
-        Rarity::VeryRare => ((195, 120, 240), (125, 45, 175)),
-        Rarity::Legendary => ((240, 175, 50), (170, 100, 0)),
-    };
-    let (r, g, b) = if dark_mode { dark } else { light };
-    Color32::from_rgb(r, g, b)
+/// badge and label colour for a rarity
+pub(super) fn rarity_color(rarity: Rarity) -> Themed {
+    match rarity {
+        Rarity::Common => Themed::rgb((185, 190, 200), (95, 100, 110)),
+        Rarity::Uncommon => Themed::rgb((80, 200, 100), (25, 125, 45)),
+        Rarity::Rare => Themed::rgb((70, 170, 240), (15, 100, 175)),
+        Rarity::VeryRare => Themed::rgb((195, 120, 240), (125, 45, 175)),
+        Rarity::Legendary => Themed::rgb((240, 175, 50), (170, 100, 0)),
+    }
 }
 
 /// scroll levels share the rarity palette, in bands
-pub(super) fn spell_color(level: usize, dark_mode: bool) -> Color32 {
+pub(super) fn spell_color(level: usize) -> Themed {
     let rarity = match level {
         0 | 1 => Rarity::Common,
         2 | 3 => Rarity::Uncommon,
@@ -136,14 +157,5 @@ pub(super) fn spell_color(level: usize, dark_mode: bool) -> Color32 {
         6..=8 => Rarity::VeryRare,
         _ => Rarity::Legendary,
     };
-    rarity_color(rarity, dark_mode)
-}
-
-/// success green, darker on light backgrounds
-pub(super) fn ok_color(dark_mode: bool) -> Color32 {
-    if dark_mode {
-        Color32::from_rgb(90, 190, 110)
-    } else {
-        Color32::from_rgb(30, 130, 55)
-    }
+    rarity_color(rarity)
 }

@@ -9,7 +9,7 @@ use egui_material_icons::icons::{
 
 use super::WerlenApp;
 use super::style::{ERR_COLOR, SECTION_SIZE, rarity_combo, with_icon};
-use crate::shop::{MAX_SCROLL_LEVEL, Notice, POOL_MAX};
+use crate::shop::{MAX_SCROLL_LEVEL, MAX_STOCK_COUNT, Notice};
 
 impl WerlenApp {
     pub(super) fn settings(&mut self, ui: &mut egui::Ui) {
@@ -19,7 +19,7 @@ impl WerlenApp {
 
             settings_section(ui, "Scrolls", |ui| {
                 setting_label(ui, "Number of scrolls", "How many scrolls the Scrolls tab stocks");
-                ui.add(egui::Slider::new(&mut settings.max_scrolls, 0..=POOL_MAX));
+                ui.add(egui::Slider::new(&mut settings.max_scrolls, 0..=MAX_STOCK_COUNT));
                 ui.end_row();
 
                 setting_label(
@@ -33,7 +33,7 @@ impl WerlenApp {
 
             settings_section(ui, "Items", |ui| {
                 setting_label(ui, "Number of items", "How many items the Items tab stocks");
-                ui.add(egui::Slider::new(&mut settings.max_items, 0..=POOL_MAX));
+                ui.add(egui::Slider::new(&mut settings.max_items, 0..=MAX_STOCK_COUNT));
                 ui.end_row();
 
                 setting_label(
@@ -51,7 +51,7 @@ impl WerlenApp {
                     "Number of specials",
                     "How many entries the Specials tab stocks, from both items and scrolls",
                 );
-                ui.add(egui::Slider::new(&mut settings.max_specials, 0..=POOL_MAX));
+                ui.add(egui::Slider::new(&mut settings.max_specials, 0..=MAX_STOCK_COUNT));
                 ui.end_row();
 
                 setting_label(

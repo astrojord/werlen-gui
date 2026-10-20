@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use egui_material_icons::icons::{ICON_CHECK_CIRCLE, ICON_ERROR};
 
-use super::style::{ERR_COLOR, ok_color, with_icon};
+use super::style::{ERR_COLOR, OK_COLOR, with_icon};
 use super::{WerlenApp, thousands};
 use crate::shop::Notice;
 
@@ -21,16 +21,8 @@ pub(super) struct Toast {
 }
 
 impl WerlenApp {
-    fn toast(&mut self, ctx: &egui::Context, text: String, error: bool) {
-        let created = ctx.input(|i| i.time);
-        self.toasts.push(Toast {
-            text,
-            error,
-            created,
-        });
-    }
-
     pub(super) fn show_toasts(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
         if let Some(notice) = self.shop.notice.take() {
             let (text, error) = match notice {
                 Notice::Imported(summary) => (
@@ -43,10 +35,13 @@ impl WerlenApp {
                 ),
                 Notice::Error(msg) => (msg, true),
             };
-            self.toast(ctx, text, error);
+            self.toasts.push(Toast {
+                text,
+                error,
+                created: now,
+            });
         }
 
-        let now = ctx.input(|i| i.time);
         self.toasts
             .retain(|toast| toast.error || now - toast.created < TOAST_SECS);
         if self.toasts.is_empty() {
@@ -73,7 +68,7 @@ impl WerlenApp {
                                     }
                                 } else {
                                     ui.colored_label(
-                                        ok_color(ui.visuals().dark_mode),
+                                        OK_COLOR.get(ui),
                                         with_icon(ICON_CHECK_CIRCLE, &toast.text),
                                     );
                                 }
