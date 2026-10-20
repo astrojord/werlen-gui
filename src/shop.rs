@@ -411,3 +411,209 @@ pub struct StockItem {
     pub category: String,
     pub price: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// a temp file path unique to this test process and `name`
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("werlen-{}-{name}", std::process::id()))
+    }
+
+    fn item(name: &str, rarity: Option<Rarity>, level: Option<usize>) -> StockItem {
+        StockItem {
+            id: None,
+            name: name.to_string(),
+            category: "Test".to_string(),
+            price: 10,
+            rarity,
+            level,
+        }
+    }
+
+    /// a shop with an in-memory database holding `per_tier` items of every
+    /// rarity and `per_tier` scrolls of every level
+    fn stocked_shop(per_tier: usize) -> Shop {
+        let mut db = Db::open_in_memory().unwrap();
+        let mut items = Vec::new();
+        for n in 0..per_tier {
+            for rarity in Rarity::ALL {
+                items.push(item(&format!("{rarity} item {n}"), Some(rarity), None));
+            }
+            for level in 0..=MAX_SCROLL_LEVEL {
+                items.push(item(
+                    &format!("level {level} scroll {n}"),
+                    None,
+                    Some(level),
+                ));
+            }
+        }
+        db.upsert_items(&items).unwrap();
+        Shop::with_db(db, None)
+    }
+
+    #[test]
+    fn read_csv_parses_items_and_scrolls() {
+        let path = temp_path("parse.csv");
+        std::fs::write(
+            &path,
+            "name,price,category,rarity,level\n\
+             Potion of Healing,25,Potion,common,\n\
+             Fire Bolt,15,Scroll,,C\n\
+             Fireball, 300 ,Scroll,,3\n\
+             Orostead Iced Tea,0,Potion,Very rare,\n\
+             Mystery,not a number,Wondrous Item,weird,\n",
+        )
+        .unwrap();
+        let items = read_csv(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let summary: Vec<_> = items
+            .iter()
+            .map(|i| (i.name.as_str(), i.price, i.rarity, i.level))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("Potion of Healing", 25, Some(Rarity::Common), None),
+                ("Fire Bolt", 15, None, Some(0)),
+                ("Fireball", 300, None, Some(3)),
+                ("Orostead Iced Tea", 0, Some(Rarity::VeryRare), None),
+                // unparseable price and unknown rarity fall back to defaults
+                ("Mystery", 0, Some(Rarity::Common), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn import_reports_added_and_updated() {
+        let path = temp_path("import.csv");
+        std::fs::write(
+            &path,
+            "name,price,category,rarity,level\n\
+             Potion of Healing,25,Potion,common,\n\
+             Fireball,300,Scroll,,3\n",
+        )
+        .unwrap();
+        let mut shop = Shop::with_db(Db::open_in_memory().unwrap(), None);
+
+        shop.import_csv(&path);
+        assert!(matches!(
+            shop.status,
+            StockStatus::Imported(ImportSummary {
+                added: 2,
+                updated: 0
+            })
+        ));
+        shop.import_csv(&path);
+        assert!(matches!(
+            shop.status,
+            StockStatus::Imported(ImportSummary {
+                added: 0,
+                updated: 2
+            })
+        ));
+        assert_eq!(shop.pool_sizes(), (1, 1));
+        std::fs::remove_file(&path).unwrap();
+
+        shop.import_csv(&path);
+        assert!(matches!(shop.status, StockStatus::Error(_)));
+    }
+
+    #[test]
+    fn generate_needs_scrolls_and_items() {
+        let mut shop = Shop::with_db(Db::open_in_memory().unwrap(), None);
+        assert!(!shop.generate_shop());
+
+        shop.add_item(&item("Bag of Holding", Some(Rarity::Uncommon), None))
+            .unwrap();
+        assert!(!shop.generate_shop());
+
+        shop.add_item(&item("Fireball", None, Some(3))).unwrap();
+        assert!(shop.generate_shop());
+    }
+
+    #[test]
+    fn generate_respects_settings() {
+        let mut shop = stocked_shop(5);
+        shop.settings = Settings {
+            max_scrolls: 30,
+            max_scroll_level: 2,
+            min_special_scroll_level: 7,
+            max_items: 25,
+            max_item_rarity: Rarity::Uncommon,
+            max_specials: 12,
+            min_special_rarity: Rarity::Rare,
+            max_special_rarity: Rarity::VeryRare,
+        };
+        assert!(shop.generate_shop());
+
+        assert_eq!(shop.scroll_stock.len(), 30);
+        assert!(shop.scroll_stock.iter().all(|s| s.level.unwrap() <= 2));
+        assert!(shop.scroll_stock.is_sorted_by_key(|s| s.level));
+
+        assert_eq!(shop.item_stock.len(), 25);
+        assert!(
+            shop.item_stock
+                .iter()
+                .all(|i| i.rarity.unwrap() <= Rarity::Uncommon)
+        );
+        assert!(shop.item_stock.is_sorted_by_key(|i| i.rarity));
+
+        assert_eq!(shop.special_stock.len(), 12);
+        for special in &shop.special_stock {
+            match (special.level, special.rarity) {
+                (Some(level), None) => assert!(level >= 7),
+                (None, Some(rarity)) => {
+                    assert!((Rarity::Rare..=Rarity::VeryRare).contains(&rarity))
+                }
+                other => panic!("unexpected special {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_item_gives_friendly_error() {
+        let mut shop = Shop::with_db(Db::open_in_memory().unwrap(), None);
+        shop.add_item(&item("Shield", None, Some(1))).unwrap();
+        let err = shop.add_item(&item("shield", None, Some(1))).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        // a different level is a different item
+        shop.add_item(&item("Shield", None, Some(2))).unwrap();
+        assert_eq!(shop.catalogue.len(), 2);
+    }
+
+    #[test]
+    fn settings_and_shop_survive_reopen() {
+        let path = temp_path("reopen.db");
+        let _ = std::fs::remove_file(&path);
+
+        let (settings, scroll_names) = {
+            let mut db = Db::open(&path).unwrap();
+            db.upsert_items(&[
+                item("Bag of Holding", Some(Rarity::Common), None),
+                item("Fireball", None, Some(1)),
+            ])
+            .unwrap();
+            let mut shop = Shop::with_db(db, Some(path.clone()));
+            shop.settings.max_scrolls = 3;
+            shop.settings.max_item_rarity = Rarity::Legendary;
+            shop.save_settings_if_changed();
+            assert!(shop.generate_shop());
+            let names: Vec<String> = shop.scroll_stock.iter().map(|s| s.name.clone()).collect();
+            (shop.settings, names)
+        };
+
+        let shop = Shop::with_db(Db::open(&path).unwrap(), Some(path.clone()));
+        assert_eq!(shop.settings, settings);
+        let reloaded: Vec<String> = shop.scroll_stock.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(reloaded, scroll_names);
+        assert_eq!(reloaded.len(), 3);
+        // picks are with replacement, so the one item fills every slot
+        assert_eq!(shop.item_stock.len(), Settings::default().max_items);
+
+        drop(shop);
+        std::fs::remove_file(&path).unwrap();
+    }
+}
