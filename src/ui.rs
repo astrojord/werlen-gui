@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::Path;
 use std::time::Duration;
 
@@ -15,6 +16,9 @@ const ACCENT: Color32 = Color32::from_rgb(255, 200, 100);
 /// how long info toasts stay up, and how long of that they spend fading out
 const TOAST_SECS: f64 = 4.0;
 const TOAST_FADE_SECS: f64 = 0.6;
+
+/// room left at the right edge of tables so the floating scrollbar doesn't cover prices
+const SCROLLBAR_GUTTER: f32 = 10.0;
 
 /// most expensive thing the item form will let you price something at
 const PRICE_MAX: usize = 1_000_000;
@@ -140,6 +144,9 @@ pub struct WerlenApp {
     pending_delete: Option<StockItem>,
 
     toasts: Vec<Toast>,
+
+    /// Column sort for each tab's table, indexed by `Tab as usize`; None keeps shop order
+    sorts: [Option<Sort>; Tab::ALL.len()],
 }
 
 impl Default for WerlenApp {
@@ -153,6 +160,7 @@ impl Default for WerlenApp {
             editing: None,
             pending_delete: None,
             toasts: Vec::new(),
+            sorts: [None; Tab::ALL.len()],
         }
     }
 }
@@ -182,16 +190,7 @@ impl WerlenApp {
                 ui.weak(self.shop_summary());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let generate = egui::Button::new(
-                    RichText::new("🎲 Generate shop")
-                        .size(16.0)
-                        .strong()
-                        .color(Color32::BLACK),
-                )
-                .fill(ACCENT)
-                .min_size(egui::vec2(160.0, 34.0));
-                if ui
-                    .add(generate)
+                if generate_button(ui)
                     .on_hover_text("Replace the current shop with a freshly generated one")
                     .clicked()
                 {
@@ -341,22 +340,33 @@ impl WerlenApp {
     }
 
     fn content(&mut self, ui: &mut egui::Ui) {
-        let (stock, level_header, kind) = match self.tab {
+        let tab = self.tab;
+        let (stock, kind) = match tab {
             Tab::Settings => return self.settings(ui),
             Tab::Catalogue => return self.catalogue(ui),
-            Tab::Scrolls => (&self.shop.scroll_stock, "Level", "scroll"),
-            Tab::Items => (&self.shop.item_stock, "Rarity", "item"),
-            Tab::Specials => (&self.shop.special_stock, "Level/Rarity", "special stock"),
+            Tab::Scrolls => (&self.shop.scroll_stock, "scroll"),
+            Tab::Items => (&self.shop.item_stock, "item"),
+            Tab::Specials => (&self.shop.special_stock, "special stock"),
         };
 
         if !self.shop.has_stock() {
-            ui.centered_and_justified(|ui| {
-                ui.weak(format!("Click Generate shop to see {kind} inventory here."));
+            let mut generate = false;
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.3);
+                ui.weak(format!("Generate a shop to see {kind} inventory here."));
+                ui.add_space(8.0);
+                generate = generate_button(ui).clicked();
             });
+            if generate {
+                self.generate();
+            }
             return;
         }
 
-        stock_table(ui, self.tab, stock, level_header);
+        let mut rows = group_repeats(stock);
+        let sort = &mut self.sorts[tab as usize];
+        sort_rows(&mut rows, *sort);
+        stock_table(ui, tab, &rows, sort);
     }
 
     fn catalogue(&mut self, ui: &mut egui::Ui) {
@@ -386,7 +396,7 @@ impl WerlenApp {
         ui.add_space(4.0);
 
         let search = self.search.trim().to_lowercase();
-        let shown: Vec<&StockItem> = self
+        let mut shown: Vec<StockRow> = self
             .shop
             .catalogue
             .iter()
@@ -400,7 +410,10 @@ impl WerlenApp {
                     || item.name.to_lowercase().contains(&search)
                     || item.category.to_lowercase().contains(&search)
             })
+            .map(|item| StockRow { item, qty: 1 })
             .collect();
+        let sort = &mut self.sorts[Tab::Catalogue as usize];
+        sort_rows(&mut shown, *sort);
 
         ui.weak(format!(
             "Showing {} of {} entries",
@@ -418,20 +431,20 @@ impl WerlenApp {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::remainder().at_least(160.0))
             .column(Column::initial(160.0).at_least(80.0))
-            .column(Column::initial(110.0).at_least(60.0))
+            .column(Column::initial(130.0).at_least(80.0))
             .column(Column::initial(90.0).at_least(60.0))
             .column(Column::auto())
             .header(row_height, |mut header| {
-                for title in ["Name", "Category", "Level/Rarity", "Price (gp)", ""] {
-                    header.col(|ui| {
-                        ui.strong(title);
-                    });
-                }
+                sort_header(&mut header, "Name", SortColumn::Name, sort, false);
+                sort_header(&mut header, "Category", SortColumn::Category, sort, false);
+                sort_header(&mut header, "Level/Rarity", SortColumn::Tier, sort, false);
+                sort_header(&mut header, "Price (gp)", SortColumn::Price, sort, true);
+                header.col(|_| {});
             })
             .body(|body| {
                 body.rows(row_height, shown.len(), |mut row| {
-                    let item = shown[row.index()];
-                    item_cells(&mut row, item);
+                    let item = shown[row.index()].item;
+                    item_cells(&mut row, item, true);
                     row.col(|ui| {
                         if ui.small_button("✏").on_hover_text("Edit").clicked() {
                             edit = Some(item);
@@ -724,8 +737,151 @@ fn open_in_file_manager(dir: &Path) -> std::io::Result<()> {
         .map(drop)
 }
 
-/// name, category, level/rarity, and price cells for one stock row
-fn item_cells(row: &mut egui_extras::TableRow, item: &StockItem) {
+/// the big accent-coloured Generate shop button
+fn generate_button(ui: &mut egui::Ui) -> egui::Response {
+    let button = egui::Button::new(
+        RichText::new("🎲 Generate shop")
+            .size(16.0)
+            .strong()
+            .color(Color32::BLACK),
+    )
+    .fill(ACCENT)
+    .min_size(egui::vec2(160.0, 34.0));
+    ui.add(button)
+}
+
+/// a row of a stock table, with repeated picks merged into a quantity
+struct StockRow<'a> {
+    item: &'a StockItem,
+    qty: usize,
+}
+
+/// merge repeated picks of the same entry, keeping first-seen order
+fn group_repeats(stock: &[StockItem]) -> Vec<StockRow<'_>> {
+    let mut rows: Vec<StockRow> = Vec::new();
+    for item in stock {
+        let existing = rows.iter_mut().find(|row| {
+            row.item.name.eq_ignore_ascii_case(&item.name)
+                && row.item.rarity == item.rarity
+                && row.item.level == item.level
+        });
+        match existing {
+            Some(row) => row.qty += 1,
+            None => rows.push(StockRow { item, qty: 1 }),
+        }
+    }
+    rows
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortColumn {
+    Qty,
+    Name,
+    Category,
+    /// level for scrolls, rarity for items; scrolls sort before items
+    Tier,
+    Price,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sort {
+    column: SortColumn,
+    descending: bool,
+}
+
+impl SortColumn {
+    fn compare(self, a: &StockRow, b: &StockRow) -> Ordering {
+        match self {
+            SortColumn::Qty => a.qty.cmp(&b.qty),
+            SortColumn::Name => a.item.name.to_lowercase().cmp(&b.item.name.to_lowercase()),
+            SortColumn::Category => a
+                .item
+                .category
+                .to_lowercase()
+                .cmp(&b.item.category.to_lowercase()),
+            SortColumn::Tier => tier_key(a.item).cmp(&tier_key(b.item)),
+            SortColumn::Price => a.item.price.cmp(&b.item.price),
+        }
+    }
+}
+
+fn tier_key(item: &StockItem) -> (u8, usize) {
+    match (item.level, item.rarity) {
+        (Some(level), _) => (0, level),
+        (None, Some(rarity)) => (1, rarity as usize),
+        (None, None) => (2, 0),
+    }
+}
+
+/// clicking a header cycles ascending -> descending -> back to shop order
+fn next_sort(current: Option<Sort>, column: SortColumn) -> Option<Sort> {
+    match current {
+        Some(sort) if sort.column == column && !sort.descending => Some(Sort {
+            column,
+            descending: true,
+        }),
+        Some(sort) if sort.column == column => None,
+        _ => Some(Sort {
+            column,
+            descending: false,
+        }),
+    }
+}
+
+/// stable sort, so ties keep shop order
+fn sort_rows(rows: &mut [StockRow], sort: Option<Sort>) {
+    let Some(sort) = sort else {
+        return;
+    };
+    rows.sort_by(|a, b| {
+        let ordering = sort.column.compare(a, b);
+        if sort.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+}
+
+/// a clickable header cell that sorts by `column`
+fn sort_header(
+    header: &mut egui_extras::TableRow,
+    title: &str,
+    column: SortColumn,
+    sort: &mut Option<Sort>,
+    align_right: bool,
+) {
+    header.col(|ui| {
+        let arrow = match sort {
+            Some(s) if s.column == column && s.descending => " ⏷",
+            Some(s) if s.column == column => " ⏶",
+            _ => "",
+        };
+        let layout = if align_right {
+            egui::Layout::right_to_left(egui::Align::Center)
+        } else {
+            egui::Layout::left_to_right(egui::Align::Center)
+        };
+        ui.with_layout(layout, |ui| {
+            if align_right && column == SortColumn::Price {
+                ui.add_space(SCROLLBAR_GUTTER);
+            }
+            let button =
+                egui::Button::new(RichText::new(format!("{title}{arrow}")).strong()).frame(false);
+            if ui
+                .add(button)
+                .on_hover_text("Sort by this column")
+                .clicked()
+            {
+                *sort = next_sort(*sort, column);
+            }
+        });
+    });
+}
+
+/// name, category, level/rarity badge, and price cells for one stock row.
+/// `verbose` badges say "Lvl 3 scroll" rather than "Level 3", for mixed lists
+fn item_cells(row: &mut egui_extras::TableRow, item: &StockItem, verbose: bool) {
     row.col(|ui| {
         ui.label(&item.name);
     });
@@ -733,40 +889,73 @@ fn item_cells(row: &mut egui_extras::TableRow, item: &StockItem) {
         ui.label(&item.category);
     });
     row.col(|ui| {
-        let (text, color) = match (item.rarity, item.level) {
-            (Some(rarity), _) => (rarity.to_string(), rarity_color(rarity)),
-            (None, Some(level)) => (level.to_string(), spell_color(level)),
-            (None, None) => (String::new(), Color32::GRAY),
-        };
-        ui.label(RichText::new(text).color(color).strong());
+        tier_badge(ui, item, verbose);
     });
     row.col(|ui| {
-        ui.label(format!("{} gp", item.price));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(SCROLLBAR_GUTTER);
+            ui.label(thousands(item.price));
+        });
     });
 }
 
-fn stock_table(ui: &mut egui::Ui, tab: Tab, stock: &[StockItem], level_header: &str) {
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+/// coloured pill showing an item's rarity or a scroll's level
+fn tier_badge(ui: &mut egui::Ui, item: &StockItem, verbose: bool) {
+    let (text, color) = match (item.rarity, item.level) {
+        (Some(rarity), _) => (rarity.to_string(), rarity_color(rarity)),
+        (None, Some(0)) if verbose => ("Cantrip scroll".to_string(), spell_color(0)),
+        (None, Some(0)) => ("Cantrip".to_string(), spell_color(0)),
+        (None, Some(level)) if verbose => (format!("Lvl {level} scroll"), spell_color(level)),
+        (None, Some(level)) => (format!("Level {level}"), spell_color(level)),
+        (None, None) => return,
+    };
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.18))
+        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.6)))
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).color(color).strong());
+        });
+}
+
+fn stock_table(ui: &mut egui::Ui, tab: Tab, rows: &[StockRow], sort: &mut Option<Sort>) {
+    let (category, tier) = match tab {
+        Tab::Scrolls => ("School", "Level"),
+        Tab::Items => ("Category", "Rarity"),
+        _ => ("Category", "Level/Rarity"),
+    };
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
     TableBuilder::new(ui)
         .id_salt(tab.title())
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::auto().at_least(40.0))
         .column(Column::remainder().at_least(160.0))
         .column(Column::initial(160.0).at_least(80.0))
-        .column(Column::initial(110.0).at_least(60.0))
+        .column(Column::initial(130.0).at_least(80.0))
         .column(Column::initial(90.0).at_least(60.0))
         .header(row_height, |mut header| {
-            for title in ["Name", "Category", level_header, "Price (gp)"] {
-                header.col(|ui| {
-                    ui.strong(title);
-                });
-            }
+            sort_header(&mut header, "Qty", SortColumn::Qty, sort, true);
+            sort_header(&mut header, "Name", SortColumn::Name, sort, false);
+            sort_header(&mut header, category, SortColumn::Category, sort, false);
+            sort_header(&mut header, tier, SortColumn::Tier, sort, false);
+            sort_header(&mut header, "Price (gp)", SortColumn::Price, sort, true);
         })
         .body(|body| {
-            body.rows(row_height, stock.len(), |mut row| {
-                let item = &stock[row.index()];
-                item_cells(&mut row, item);
+            body.rows(row_height, rows.len(), |mut row| {
+                let StockRow { item, qty } = rows[row.index()];
+                row.col(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if qty > 1 {
+                            ui.strong(format!("×{qty}"));
+                        } else {
+                            ui.weak("1");
+                        }
+                    });
+                });
+                item_cells(&mut row, item, tab == Tab::Specials);
             });
         });
 }
@@ -812,6 +1001,87 @@ fn spell_color(level: usize) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(name: &str, level: Option<usize>, rarity: Option<Rarity>, price: usize) -> StockItem {
+        StockItem {
+            id: None,
+            name: name.to_string(),
+            category: String::new(),
+            price,
+            rarity,
+            level,
+        }
+    }
+
+    #[test]
+    fn repeats_are_grouped_in_first_seen_order() {
+        let stock = [
+            item("Shield", Some(1), None, 60),
+            item("Fireball", Some(3), None, 300),
+            item("shield", Some(1), None, 60),
+            item("Shield", Some(2), None, 60), // different level, different entry
+        ];
+        let rows = group_repeats(&stock);
+        let summary: Vec<_> = rows
+            .iter()
+            .map(|r| (r.item.name.as_str(), r.item.level, r.qty))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("Shield", Some(1), 2),
+                ("Fireball", Some(3), 1),
+                ("Shield", Some(2), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_cycles_and_orders() {
+        let name = Some(Sort {
+            column: SortColumn::Name,
+            descending: false,
+        });
+        assert_eq!(next_sort(None, SortColumn::Name), name);
+        let desc = next_sort(name, SortColumn::Name);
+        assert_eq!(desc.map(|s| s.descending), Some(true));
+        assert_eq!(next_sort(desc, SortColumn::Name), None);
+        assert_eq!(
+            next_sort(desc, SortColumn::Price).map(|s| s.column),
+            Some(SortColumn::Price)
+        );
+
+        let stock = [
+            item("Bag of Holding", None, Some(Rarity::Uncommon), 1000),
+            item("Fireball", Some(3), None, 300),
+            item("Potion of Healing", None, Some(Rarity::Common), 25),
+            item("Shield", Some(1), None, 60),
+        ];
+        let names = |sort| {
+            let mut rows = group_repeats(&stock);
+            sort_rows(&mut rows, sort);
+            rows.iter().map(|r| r.item.name.clone()).collect::<Vec<_>>()
+        };
+        // scrolls by level, then items by rarity
+        assert_eq!(
+            names(Some(Sort {
+                column: SortColumn::Tier,
+                descending: false
+            })),
+            ["Shield", "Fireball", "Potion of Healing", "Bag of Holding"]
+        );
+        assert_eq!(
+            names(Some(Sort {
+                column: SortColumn::Price,
+                descending: true
+            })),
+            ["Bag of Holding", "Fireball", "Shield", "Potion of Healing"]
+        );
+        assert_eq!(
+            names(None),
+            ["Bag of Holding", "Fireball", "Potion of Healing", "Shield"]
+        );
+    }
 
     #[test]
     fn thousands_separators() {

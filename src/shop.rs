@@ -377,7 +377,13 @@ impl Rarity {
 
 impl fmt::Display for Rarity {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        f.write_str(match self {
+            Rarity::Common => "Common",
+            Rarity::Uncommon => "Uncommon",
+            Rarity::Rare => "Rare",
+            Rarity::VeryRare => "Very Rare",
+            Rarity::Legendary => "Legendary",
+        })
     }
 }
 
