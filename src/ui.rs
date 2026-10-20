@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use egui::{Color32, Key, RichText};
 use egui_extras::{Column, TableBuilder};
@@ -41,21 +41,19 @@ pub struct WerlenApp {
 
 impl Default for WerlenApp {
     fn default() -> Self {
-        let shop = Shop::default();
-        let stock_source_text = shop.stock_source.display().to_string();
         Self {
-            shop,
+            shop: Shop::open(),
             tab: Tab::default(),
             stock_error: false,
-            stock_source_text,
+            stock_source_text: String::new(),
         }
     }
 }
 
 impl WerlenApp {
     fn reload_stock(&mut self) {
-        self.shop.stock_source = PathBuf::from(self.stock_source_text.trim());
-        self.shop.update_stock_pools();
+        self.shop
+            .import_csv(Path::new(self.stock_source_text.trim()));
     }
 
     fn generate(&mut self) {
@@ -86,13 +84,21 @@ impl WerlenApp {
             });
         });
 
-        let (status_text, status_color) = match &self.shop.stock_status {
-            StockStatus::NotLoaded => (
-                "● Stock not loaded — click Reload stock to load".to_string(),
+        let (scrolls, items) = self.shop.pool_sizes();
+        let (status_text, status_color) = match &self.shop.status {
+            StockStatus::Ready if scrolls + items == 0 => (
+                "● Database empty — import a CSV to add stock".to_string(),
                 ERR_COLOR,
             ),
-            StockStatus::Loaded { scrolls, items } => (
-                format!("● Stock loaded — {scrolls} scrolls / {items} items"),
+            StockStatus::Ready => (
+                format!("● Database: {scrolls} scrolls / {items} items"),
+                OK_COLOR,
+            ),
+            StockStatus::Imported(summary) => (
+                format!(
+                    "● Imported CSV — {} added, {} updated. Database: {scrolls} scrolls / {items} items",
+                    summary.added, summary.updated
+                ),
                 OK_COLOR,
             ),
             StockStatus::Error(msg) => (format!("✕ Load error: {msg}"), ERR_COLOR),
@@ -130,7 +136,7 @@ impl WerlenApp {
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
-        let shop = &mut self.shop;
+        let settings = &mut self.shop.settings;
         let mut load = false;
         egui::Grid::new("settings")
             .num_columns(2)
@@ -138,51 +144,52 @@ impl WerlenApp {
             .striped(true)
             .show(ui, |ui| {
                 ui.label("Max scrolls");
-                ui.add(egui::DragValue::new(&mut shop.max_scrolls).range(0..=POOL_MAX));
+                ui.add(egui::DragValue::new(&mut settings.max_scrolls).range(0..=POOL_MAX));
                 ui.end_row();
 
                 ui.label("Max scroll level");
                 ui.add(
-                    egui::DragValue::new(&mut shop.max_scroll_level).range(0..=MAX_SCROLL_LEVEL),
+                    egui::DragValue::new(&mut settings.max_scroll_level)
+                        .range(0..=MAX_SCROLL_LEVEL),
                 );
                 ui.end_row();
 
                 ui.label("Min special scroll level");
                 ui.add(
-                    egui::DragValue::new(&mut shop.min_special_scroll_level)
+                    egui::DragValue::new(&mut settings.min_special_scroll_level)
                         .range(0..=MAX_SCROLL_LEVEL),
                 );
                 ui.end_row();
 
                 ui.label("Max items");
-                ui.add(egui::DragValue::new(&mut shop.max_items).range(0..=POOL_MAX));
+                ui.add(egui::DragValue::new(&mut settings.max_items).range(0..=POOL_MAX));
                 ui.end_row();
 
                 ui.label("Max item rarity");
-                rarity_combo(ui, "max_item_rarity", &mut shop.max_item_rarity, ..);
+                rarity_combo(ui, "max_item_rarity", &mut settings.max_item_rarity, ..);
                 ui.end_row();
 
                 ui.label("Max specials");
-                ui.add(egui::DragValue::new(&mut shop.max_specials).range(0..=POOL_MAX));
+                ui.add(egui::DragValue::new(&mut settings.max_specials).range(0..=POOL_MAX));
                 ui.end_row();
 
                 // min/max special rarity can't cross each other
                 ui.label("Min special rarity");
-                let max = shop.max_special_rarity;
+                let max = settings.max_special_rarity;
                 rarity_combo(
                     ui,
                     "min_special_rarity",
-                    &mut shop.min_special_rarity,
+                    &mut settings.min_special_rarity,
                     ..=max,
                 );
                 ui.end_row();
 
                 ui.label("Max special rarity");
-                let min = shop.min_special_rarity;
+                let min = settings.min_special_rarity;
                 rarity_combo(
                     ui,
                     "max_special_rarity",
-                    &mut shop.max_special_rarity,
+                    &mut settings.max_special_rarity,
                     min..,
                 );
                 ui.end_row();
@@ -232,6 +239,7 @@ impl eframe::App for WerlenApp {
 
         egui::Panel::top("header").show(ui, |ui| self.header(ui));
         egui::CentralPanel::default().show(ui, |ui| self.content(ui));
+        self.shop.save_settings_if_changed();
 
         self.stock_error_modal(&ctx);
     }

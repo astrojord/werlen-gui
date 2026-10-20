@@ -2,8 +2,11 @@ use rand::Rng;
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
 use rand::seq::IndexedRandom;
-use std::path::PathBuf;
+use rusqlite::ErrorCode;
+use std::path::{Path, PathBuf};
 use std::{error::Error, fmt};
+
+use crate::db::{Db, ImportSummary};
 
 /// max spell level within 5e
 pub const MAX_SCROLL_LEVEL: usize = 9;
@@ -11,135 +14,151 @@ pub const MAX_SCROLL_LEVEL: usize = 9;
 /// upper bound on the size of any one stock list
 pub const POOL_MAX: usize = 128;
 
-#[derive(Debug)]
 pub struct Shop {
-    /// Whether the stock source CSV has been loaded, and what happened last time we tried
-    pub stock_status: StockStatus,
+    db: Db,
+    /// Where the database file lives; None if we fell back to an in-memory database
+    pub db_path: Option<PathBuf>,
 
-    /// Settings
-    pub max_scrolls: usize,
-    pub max_scroll_level: usize,
-    pub min_special_scroll_level: usize,
-    pub max_items: usize,
-    pub max_item_rarity: Rarity,
-    pub max_specials: usize,
-    pub max_special_rarity: Rarity,
-    pub min_special_rarity: Rarity,
-    pub stock_source: PathBuf,
+    /// Outcome of the last load/import, shown in the header
+    pub status: StockStatus,
 
-    // Stock pools, populated from stock source
-    scroll_stock_pool: Vec<StockItem>,
-    item_stock_pool: Vec<StockItem>,
+    pub settings: Settings,
+    /// what's in the database, so we only write settings when they change
+    saved_settings: Settings,
 
-    /// Current shop stock, taken from pools
+    /// Every item and scroll in the database; the pool shops are drawn from
+    pub catalogue: Vec<StockItem>,
+
+    /// Current shop stock, taken from the catalogue
     pub scroll_stock: Vec<StockItem>,
     pub item_stock: Vec<StockItem>,
     pub special_stock: Vec<StockItem>,
 }
 
-impl Default for Shop {
-    fn default() -> Self {
-        Self {
-            stock_status: StockStatus::default(),
-            max_scrolls: 20,
-            max_scroll_level: 3,
-            min_special_scroll_level: 4,
-            max_items: 10,
-            max_item_rarity: Rarity::Uncommon,
-            max_specials: 5,
-            max_special_rarity: Rarity::VeryRare,
-            min_special_rarity: Rarity::Rare,
-            stock_source: PathBuf::from(r"/home/jordan/code/werlen/stock_source.csv"),
-            scroll_stock_pool: Vec::new(),
-            item_stock_pool: Vec::new(),
+impl Shop {
+    /// Open the database in the platform data dir, falling back to an
+    /// in-memory database (with an error status) if that fails
+    pub fn open() -> Self {
+        let path = Db::default_path();
+        let opened = match &path {
+            Some(path) => Db::open(path).map_err(|err| err.to_string()),
+            None => Err("couldn't find a data directory".to_string()),
+        };
+        match opened {
+            Ok(db) => Self::with_db(db, path),
+            Err(err) => {
+                let db = Db::open_in_memory().expect("in-memory sqlite should always open");
+                let mut shop = Self::with_db(db, None);
+                shop.status = StockStatus::Error(format!(
+                    "couldn't open the database, nothing will be saved: {err}"
+                ));
+                shop
+            }
+        }
+    }
+
+    pub fn with_db(db: Db, db_path: Option<PathBuf>) -> Self {
+        let mut shop = Self {
+            db,
+            db_path,
+            status: StockStatus::Ready,
+            settings: Settings::default(),
+            saved_settings: Settings::default(),
+            catalogue: Vec::new(),
             scroll_stock: Vec::new(),
             item_stock: Vec::new(),
             special_stock: Vec::new(),
+        };
+        if let Err(err) = shop.load() {
+            shop.status = StockStatus::Error(err.to_string());
         }
-    }
-}
-
-impl Shop {
-    pub fn update_stock_pools(&mut self) {
-        self.item_stock_pool.clear();
-        self.scroll_stock_pool.clear();
-
-        match self.read_csv() {
-            Ok(()) => {
-                self.stock_status = StockStatus::Loaded {
-                    scrolls: self.scroll_stock_pool.len(),
-                    items: self.item_stock_pool.len(),
-                };
-            }
-            Err(err) => {
-                self.stock_status = StockStatus::Error(err.to_string());
-            }
-        }
+        shop
     }
 
-    fn read_csv(&mut self) -> Result<(), Box<dyn Error>> {
-        // read csv and populate the stock pools
-        let mut reader = csv::Reader::from_path(self.stock_source.as_path())?;
-        for result in reader.records() {
-            let record = result?;
-
-            let name = record.get(0).unwrap_or_default().trim().to_string();
-            let price: usize = record
-                .get(1)
-                .unwrap_or_default()
-                .trim()
-                .parse()
-                .unwrap_or_default();
-            let category = record.get(2).unwrap_or_default().trim().to_string();
-            let rarity_str = record.get(3).unwrap_or_default().trim().to_lowercase();
-            let level_str = record.get(4).unwrap_or_default().trim();
-
-            let rarity = if rarity_str.is_empty() {
-                None
-            } else {
-                Some(match rarity_str.as_str() {
-                    "uncommon" => Rarity::Uncommon,
-                    "rare" => Rarity::Rare,
-                    "very rare" => Rarity::VeryRare,
-                    "legendary" => Rarity::Legendary,
-                    _ => Rarity::Common,
-                })
-            };
-
-            let level = if level_str.is_empty() {
-                None
-            } else {
-                Some(level_str.parse::<usize>().unwrap_or_default())
-            };
-
-            let new_stock_item = StockItem {
-                id: None,
-                name,
-                price,
-                category,
-                rarity,
-                level,
-            };
-
-            if level.is_some() {
-                self.scroll_stock_pool.push(new_stock_item);
-            } else {
-                self.item_stock_pool.push(new_stock_item);
-            }
+    fn load(&mut self) -> rusqlite::Result<()> {
+        if let Some(settings) = self.db.load_settings()? {
+            self.settings = settings;
+            self.saved_settings = settings;
         }
+        [self.scroll_stock, self.item_stock, self.special_stock] = self.db.load_shop()?;
+        self.catalogue = self.db.items()?;
         Ok(())
     }
 
-    /// Generate a fresh shop from the stock pools.
-    /// Returns false if the pools haven't been loaded.
+    /// (scrolls, items) in the catalogue
+    pub fn pool_sizes(&self) -> (usize, usize) {
+        let scrolls = self.catalogue.iter().filter(|i| i.level.is_some()).count();
+        (scrolls, self.catalogue.len() - scrolls)
+    }
+
+    /// Write settings to the database if they've changed since the last save.
+    /// Cheap to call every frame.
+    pub fn save_settings_if_changed(&mut self) {
+        if self.settings == self.saved_settings {
+            return;
+        }
+        // remember these even on failure so a broken database isn't retried every frame
+        self.saved_settings = self.settings;
+        if let Err(err) = self.db.save_settings(&self.settings) {
+            self.status = StockStatus::Error(format!("couldn't save settings: {err}"));
+        }
+    }
+
+    /// Add or update catalogue items from a CSV file
+    pub fn import_csv(&mut self, path: &Path) {
+        let result = read_csv(path).and_then(|items| Ok(self.db.upsert_items(&items)?));
+        self.status = match result {
+            Ok(summary) => StockStatus::Imported(summary),
+            Err(err) => StockStatus::Error(format!("import failed: {err}")),
+        };
+        self.reload_catalogue();
+    }
+
+    pub fn add_item(&mut self, item: &StockItem) -> Result<(), String> {
+        let result = self.db.insert_item(item).map(drop);
+        self.after_edit(result)
+    }
+
+    pub fn update_item(&mut self, id: i64, item: &StockItem) -> Result<(), String> {
+        let result = self.db.update_item(id, item);
+        self.after_edit(result)
+    }
+
+    pub fn delete_item(&mut self, id: i64) -> Result<(), String> {
+        let result = self.db.delete_item(id);
+        self.after_edit(result)
+    }
+
+    fn after_edit(&mut self, result: rusqlite::Result<()>) -> Result<(), String> {
+        result.map_err(|err| match err.sqlite_error_code() {
+            Some(ErrorCode::ConstraintViolation) => {
+                "an item with that name, rarity and level already exists".to_string()
+            }
+            _ => err.to_string(),
+        })?;
+        self.reload_catalogue();
+        Ok(())
+    }
+
+    fn reload_catalogue(&mut self) {
+        match self.db.items() {
+            Ok(items) => self.catalogue = items,
+            Err(err) => self.status = StockStatus::Error(err.to_string()),
+        }
+    }
+
+    /// Generate a fresh shop from the catalogue and save it.
+    /// Returns false if there are no scrolls or no items to draw from.
     pub fn generate_shop(&mut self) -> bool {
         // check that we actually have shop stock pool to look at
-        if self.item_stock_pool.is_empty() || self.scroll_stock_pool.is_empty() {
+        let (scroll_count, item_count) = self.pool_sizes();
+        if scroll_count == 0 || item_count == 0 {
             return false;
         }
 
         // new RNG whenever we re-generate
         let mut rng = rand::rng();
+        let settings = self.settings;
         // clear current stocks
         self.item_stock.clear();
         self.scroll_stock.clear();
@@ -147,25 +166,25 @@ impl Shop {
 
         // bucket the pools by tier so weighted picks are a tier draw
         // followed by a uniform draw within that tier
-        let item_buckets = bucket_by_rarity(&self.item_stock_pool);
-        let level_buckets = bucket_by_level(&self.scroll_stock_pool);
+        let item_buckets = bucket_by_rarity(&self.catalogue);
+        let level_buckets = bucket_by_level(&self.catalogue);
 
-        let item_choices: Vec<(u32, &Vec<&StockItem>)> = (0..=self.max_item_rarity as usize)
+        let item_choices: Vec<(u32, &Vec<&StockItem>)> = (0..=settings.max_item_rarity as usize)
             .map(|r| (rarity_weight(r), &item_buckets[r]))
             .collect();
 
-        while self.item_stock.len() < self.max_items {
+        while self.item_stock.len() < settings.max_items {
             match weighted_pick(&item_choices, &mut rng) {
                 Some(chosen) => self.item_stock.push(chosen.clone()),
                 None => break, // nothing in the pool qualifies; stop rather than spin forever
             }
         }
 
-        let scroll_choices: Vec<(u32, &Vec<&StockItem>)> = (0..=self.max_scroll_level)
+        let scroll_choices: Vec<(u32, &Vec<&StockItem>)> = (0..=settings.max_scroll_level)
             .map(|l| (scroll_level_weight(l), &level_buckets[l]))
             .collect();
 
-        while self.scroll_stock.len() < self.max_scrolls {
+        while self.scroll_stock.len() < settings.max_scrolls {
             match weighted_pick(&scroll_choices, &mut rng) {
                 Some(chosen) => self.scroll_stock.push(chosen.clone()),
                 None => break,
@@ -173,15 +192,15 @@ impl Shop {
         }
 
         // specials draw from item and scroll tiers combined into a single bucket
-        let special_item_choices = (self.min_special_rarity as usize
-            ..=self.max_special_rarity as usize)
+        let special_item_choices = (settings.min_special_rarity as usize
+            ..=settings.max_special_rarity as usize)
             .map(|r| (rarity_weight(r), &item_buckets[r]));
-        let special_scroll_choices = (self.min_special_scroll_level..=MAX_SCROLL_LEVEL)
+        let special_scroll_choices = (settings.min_special_scroll_level..=MAX_SCROLL_LEVEL)
             .map(|l| (scroll_level_weight(l), &level_buckets[l]));
         let special_choices: Vec<(u32, &Vec<&StockItem>)> =
             special_item_choices.chain(special_scroll_choices).collect();
 
-        while self.special_stock.len() < self.max_specials {
+        while self.special_stock.len() < settings.max_specials {
             match weighted_pick(&special_choices, &mut rng) {
                 Some(chosen) => self.special_stock.push(chosen.clone()),
                 None => break,
@@ -198,6 +217,13 @@ impl Shop {
 
         self.scroll_stock.sort_by_key(|item| item.level);
         self.item_stock.sort_by_key(|item| item.rarity);
+
+        if let Err(err) =
+            self.db
+                .save_shop([&self.scroll_stock, &self.item_stock, &self.special_stock])
+        {
+            self.status = StockStatus::Error(format!("couldn't save the shop: {err}"));
+        }
         true
     }
 
@@ -206,6 +232,56 @@ impl Shop {
             && self.item_stock.is_empty()
             && self.special_stock.is_empty())
     }
+}
+
+/// parse a stock CSV with columns name, price, category, rarity, level
+fn read_csv(path: &Path) -> Result<Vec<StockItem>, Box<dyn Error>> {
+    let mut items = Vec::new();
+    let mut reader = csv::Reader::from_path(path)?;
+    for result in reader.records() {
+        let record = result?;
+
+        let name = record.get(0).unwrap_or_default().trim().to_string();
+        let price: usize = record
+            .get(1)
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or_default();
+        let category = record.get(2).unwrap_or_default().trim().to_string();
+        let rarity_str = record.get(3).unwrap_or_default().trim().to_lowercase();
+        let level_str = record.get(4).unwrap_or_default().trim();
+
+        let rarity = if rarity_str.is_empty() {
+            None
+        } else {
+            Some(match rarity_str.as_str() {
+                "uncommon" => Rarity::Uncommon,
+                "rare" => Rarity::Rare,
+                "very rare" => Rarity::VeryRare,
+                "legendary" => Rarity::Legendary,
+                _ => Rarity::Common,
+            })
+        };
+
+        let level = if level_str.is_empty() {
+            None
+        } else if level_str.eq_ignore_ascii_case("c") {
+            Some(0) // cantrip
+        } else {
+            Some(level_str.parse::<usize>().unwrap_or_default())
+        };
+
+        items.push(StockItem {
+            id: None,
+            name,
+            price,
+            category,
+            rarity,
+            level,
+        });
+    }
+    Ok(items)
 }
 
 /// sort items into buckets by rarity (index 0 = Common .. 4 = Legendary)
@@ -264,12 +340,10 @@ fn weighted_pick<'a>(
 
 #[derive(Debug, Default, Clone)]
 pub enum StockStatus {
+    /// Database opened fine; nothing to report
     #[default]
-    NotLoaded,
-    Loaded {
-        scrolls: usize,
-        items: usize,
-    },
+    Ready,
+    Imported(ImportSummary),
     Error(String),
 }
 
