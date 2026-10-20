@@ -7,11 +7,13 @@ license = "MIT"
 edition = "2024"
 
 [dependencies]
+chrono = "0.4"
 csv = "1.4"
 directories = "6"
-eframe = "0.37"
+eframe = { version = "0.37", features = ["persistence"] }
 egui = "0.37"
 egui_extras = "0.37"
+egui_material_icons = "0.9"
 rand = "0.10.1"
 rfd = "0.17"
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }

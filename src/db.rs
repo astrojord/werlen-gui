@@ -8,7 +8,10 @@ use crate::shop::{Rarity, Settings, StockItem};
 
 /// schema migrations, applied in order. A database's `user_version` is the
 /// number of these it has already had applied; add a new file to change the schema
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/001_initial.sql"),
+    include_str!("../migrations/002_shop_meta.sql"),
+];
 
 /// which of the three generated stock lists a row belongs to
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +23,15 @@ pub enum StockList {
 
 impl StockList {
     pub const ALL: [StockList; 3] = [StockList::Scrolls, StockList::Items, StockList::Specials];
+}
+
+/// the last generated shop as saved in the database
+#[derive(Debug, Default)]
+pub struct SavedShop {
+    /// stock lists in [`StockList::ALL`] order
+    pub lists: [Vec<StockItem>; 3],
+    /// unix seconds; None if no shop has been generated yet
+    pub generated_at: Option<i64>,
 }
 
 /// result of a CSV import: how many rows were new vs matched an existing item
@@ -217,7 +229,7 @@ impl Db {
     }
 
     /// the last generated shop, in [`StockList::ALL`] order
-    pub fn load_shop(&self) -> rusqlite::Result<[Vec<StockItem>; 3]> {
+    pub fn load_shop(&self) -> rusqlite::Result<SavedShop> {
         let mut stmt = self.conn.prepare(
             "SELECT name, category, price, rarity, level FROM shop_stock
              WHERE list = ?1 ORDER BY position",
@@ -228,13 +240,33 @@ impl Db {
                 .query_map(params![list as u8], |row| item_from_row(row, 0))?
                 .collect::<rusqlite::Result<_>>()?;
         }
-        Ok(lists)
+        let generated_at = self
+            .conn
+            .query_row(
+                "SELECT generated_at FROM shop_meta WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(SavedShop {
+            lists,
+            generated_at,
+        })
     }
 
-    /// replace the saved shop with `lists`, given in [`StockList::ALL`] order
-    pub fn save_shop(&mut self, lists: [&[StockItem]; 3]) -> rusqlite::Result<()> {
+    /// replace the saved shop with `lists`, given in [`StockList::ALL`] order,
+    /// generated at `generated_at` (unix seconds)
+    pub fn save_shop(
+        &mut self,
+        lists: [&[StockItem]; 3],
+        generated_at: i64,
+    ) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM shop_stock", [])?;
+        tx.execute(
+            "INSERT OR REPLACE INTO shop_meta (id, generated_at) VALUES (1, ?1)",
+            params![generated_at],
+        )?;
         {
             let mut insert = tx.prepare(
                 "INSERT INTO shop_stock (list, position, name, category, price, rarity, level)
@@ -307,7 +339,9 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         assert!(db.items().unwrap().is_empty());
         assert_eq!(db.load_settings().unwrap(), None);
-        assert!(db.load_shop().unwrap().iter().all(Vec::is_empty));
+        let saved = db.load_shop().unwrap();
+        assert!(saved.lists.iter().all(Vec::is_empty));
+        assert_eq!(saved.generated_at, None);
     }
 
     #[test]
@@ -412,9 +446,11 @@ mod tests {
             item("Fireball", None, Some(3), 300),
         ];
         let items = [item("Bag of Holding", Some(Rarity::Uncommon), None, 1000)];
-        db.save_shop([&scrolls, &items, &[]]).unwrap();
+        db.save_shop([&scrolls, &items, &[]], 1_000).unwrap();
 
-        let [s, i, sp] = db.load_shop().unwrap();
+        let saved = db.load_shop().unwrap();
+        assert_eq!(saved.generated_at, Some(1_000));
+        let [s, i, sp] = saved.lists;
         assert_eq!(
             s.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
             ["Shield", "Fireball"]
@@ -423,8 +459,10 @@ mod tests {
         assert!(sp.is_empty());
 
         // saving again replaces rather than appends
-        db.save_shop([&[], &items, &[]]).unwrap();
-        let [s, i, _] = db.load_shop().unwrap();
+        db.save_shop([&[], &items, &[]], 2_000).unwrap();
+        let saved = db.load_shop().unwrap();
+        assert_eq!(saved.generated_at, Some(2_000));
+        let [s, i, _] = saved.lists;
         assert!(s.is_empty());
         assert_eq!(i.len(), 1);
     }

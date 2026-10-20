@@ -13,6 +13,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "werlen-gui",
         options,
-        Box::new(|_cc| Ok(Box::new(ui::WerlenApp::default()))),
+        Box::new(|cc| {
+            ui::setup_fonts(&cc.egui_ctx);
+            Ok(Box::new(ui::WerlenApp::default()))
+        }),
     )
 }
