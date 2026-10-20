@@ -3,8 +3,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::{Local, TimeZone};
-use egui::{Color32, RichText};
+use egui::{Color32, RichText, ThemePreference};
 use egui_extras::{Column, TableBuilder};
+use egui_material_icons::MaterialIcon;
+use egui_material_icons::icons::{
+    ICON_ADD, ICON_ARROW_DROP_DOWN, ICON_ARROW_DROP_UP, ICON_BRIGHTNESS_AUTO, ICON_CASINO,
+    ICON_CHECK_CIRCLE, ICON_DARK_MODE, ICON_DELETE, ICON_EDIT, ICON_ERROR, ICON_FOLDER_OPEN,
+    ICON_LIGHT_MODE, ICON_SEARCH, ICON_UPLOAD_FILE,
+};
 
 use crate::shop::{MAX_SCROLL_LEVEL, Notice, POOL_MAX, Rarity, Shop, StockItem};
 
@@ -317,14 +323,14 @@ impl WerlenApp {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 if toast.error {
-                                    ui.colored_label(ERR_COLOR, format!("✕ {}", toast.text));
+                                    ui.colored_label(ERR_COLOR, with_icon(ICON_ERROR, &toast.text));
                                     if ui.small_button("Dismiss").clicked() {
                                         dismissed = Some(i);
                                     }
                                 } else {
                                     ui.colored_label(
                                         ok_color(ui.visuals().dark_mode),
-                                        format!("✔ {}", toast.text),
+                                        with_icon(ICON_CHECK_CIRCLE, &toast.text),
                                     );
                                 }
                             });
@@ -374,13 +380,13 @@ impl WerlenApp {
 
     fn catalogue(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("➕ Add item").clicked() {
+            if ui.button(with_icon(ICON_ADD, "Add item")).clicked() {
                 self.editing = Some(ItemForm::new());
             }
             ui.separator();
             ui.add(
                 egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Search name or category")
+                    .hint_text(with_icon(ICON_SEARCH, "Search name or category"))
                     .desired_width(240.0),
             );
             ui.selectable_value(&mut self.kind_filter, None, "All");
@@ -388,7 +394,7 @@ impl WerlenApp {
             ui.selectable_value(&mut self.kind_filter, Some(Kind::Item), "Items");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button("📥 Import CSV…")
+                    .button(with_icon(ICON_UPLOAD_FILE, "Import CSV…"))
                     .on_hover_text("Add or update catalogue entries from a stock CSV")
                     .clicked()
                 {
@@ -449,10 +455,14 @@ impl WerlenApp {
                     let item = shown[row.index()].item;
                     item_cells(&mut row, item, true);
                     row.col(|ui| {
-                        if ui.small_button("✏").on_hover_text("Edit").clicked() {
+                        if ui.small_button(ICON_EDIT).on_hover_text("Edit").clicked() {
                             edit = Some(item);
                         }
-                        if ui.small_button("🗑").on_hover_text("Delete").clicked() {
+                        if ui
+                            .small_button(ICON_DELETE)
+                            .on_hover_text("Delete")
+                            .clicked()
+                        {
                             delete = Some(item);
                         }
                     });
@@ -545,7 +555,7 @@ impl WerlenApp {
 
             settings_section(ui, "Appearance", |ui| {
                 setting_label(ui, "Theme", "Follow the system theme, or force light or dark");
-                egui::global_theme_preference_buttons(ui);
+                theme_buttons(ui);
                 ui.end_row();
             });
 
@@ -558,7 +568,7 @@ impl WerlenApp {
                 ui.horizontal(|ui| match &self.shop.db_path {
                     Some(path) => {
                         ui.monospace(path.display().to_string());
-                        open_folder = ui.button("Open folder").clicked();
+                        open_folder = ui.button(with_icon(ICON_FOLDER_OPEN, "Open folder")).clicked();
                     }
                     None => {
                         ui.colored_label(ERR_COLOR, "in memory — changes won't be saved");
@@ -769,6 +779,30 @@ fn open_in_file_manager(dir: &Path) -> std::io::Result<()> {
         .map(drop)
 }
 
+/// "<icon> text", for buttons and labels; the icon font is a fallback for
+/// ordinary text, so the codepoint renders inline
+fn with_icon(icon: MaterialIcon, text: &str) -> String {
+    format!("{} {text}", icon.codepoint)
+}
+
+/// system/dark/light theme picker
+fn theme_buttons(ui: &mut egui::Ui) {
+    let current = ui.ctx().options(|options| options.theme_preference);
+    let mut preference = current;
+    ui.horizontal(|ui| {
+        for (value, icon, label) in [
+            (ThemePreference::System, ICON_BRIGHTNESS_AUTO, "System"),
+            (ThemePreference::Dark, ICON_DARK_MODE, "Dark"),
+            (ThemePreference::Light, ICON_LIGHT_MODE, "Light"),
+        ] {
+            ui.selectable_value(&mut preference, value, with_icon(icon, label));
+        }
+    });
+    if preference != current {
+        ui.ctx().set_theme(preference);
+    }
+}
+
 /// the block-letter WERLEN'S banner from the TUI
 const BANNER: &str = include_str!("../assets/werlen_ascii.txt");
 const BANNER_SIZE: f32 = 12.0;
@@ -802,7 +836,7 @@ fn banner(ui: &mut egui::Ui) {
 /// the big accent-coloured Generate shop button
 fn generate_button(ui: &mut egui::Ui) -> egui::Response {
     let button = egui::Button::new(
-        RichText::new("🎲 Generate shop")
+        RichText::new(with_icon(ICON_CASINO, "Generate shop"))
             .size(16.0)
             .strong()
             .color(Color32::BLACK),
@@ -915,8 +949,8 @@ fn sort_header(
 ) {
     header.col(|ui| {
         let arrow = match sort {
-            Some(s) if s.column == column && s.descending => " ⏷",
-            Some(s) if s.column == column => " ⏶",
+            Some(s) if s.column == column && s.descending => ICON_ARROW_DROP_DOWN.codepoint,
+            Some(s) if s.column == column => ICON_ARROW_DROP_UP.codepoint,
             _ => "",
         };
         let layout = if align_right {
@@ -929,7 +963,7 @@ fn sort_header(
                 ui.add_space(SCROLLBAR_GUTTER);
             }
             let button =
-                egui::Button::new(RichText::new(format!("{title}{arrow}")).strong()).frame(false);
+                egui::Button::new(RichText::new(format!("{title} {arrow}")).strong()).frame(false);
             if ui
                 .add(button)
                 .on_hover_text("Sort by this column")
